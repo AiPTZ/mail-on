@@ -9,5 +9,6 @@ Indice do produto.
 | `docs/API.md` | REST `/api/v1`, auth, contratos, erros |
 | `docs/INTEGRATION.md` | como chamar a API, sync de contatos, cron, webhooks |
 | `docs/superpowers/specs/2026-08-26-mail-on-design.md` | spec original do MVP |
+| `docs/superpowers/specs/2026-08-26-mail-on-admin-design.md` | spec do super-admin |
 
 Comece por `docs/PRODUCT.md`. Para integrar por HTTP, use `docs/API.md` e `docs/INTEGRATION.md`.

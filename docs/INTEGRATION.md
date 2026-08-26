@@ -1,12 +1,13 @@
 # Mail ON — integracao via API
 
-Como outro sistema fala com o Mail ON por HTTP. O painel (`/agency`, `/app`) continua independente. Contratos em `docs/API.md`.
+Como outro sistema fala com o Mail ON por HTTP. O painel (`/admin`, `/agency`, `/app`) continua independente. Contratos em `docs/API.md`.
 
 ## Mapa
 
 | Conceito externo | Mail ON |
 |---|---|
-| conta da operadora | `Agency` |
+| conta da plataforma | `Admin` |
+| conta da operadora | `Agency` (leitura) |
 | conta do cliente | `Workspace` |
 | contato | `Contact` (`crmContactId` opcional + email) |
 | opt-out / bounce | `Contact.status = suppressed` |
@@ -17,7 +18,7 @@ Como outro sistema fala com o Mail ON por HTTP. O painel (`/agency`, `/app`) con
 
 ## Identidade
 
-1. API key de agency (`MAILON_API_KEY`) + `X-Workspace-Id` em toda chamada. Melhor para backend-to-backend.
+1. API key de admin (`MAILON_API_KEY`) + `X-Workspace-Id` em toda chamada. Melhor para backend-to-backend. A key autentica como o primeiro `admin`.
 2. `POST /api/v1/auth/login` com usuario do workspace. Token 14 dias.
 3. Cookie `mailon_session` da UI tambem vale nas rotas `/api/v1`.
 
@@ -54,7 +55,7 @@ Nunca reimportar quem deu bounce. O webhook Mailgun deve atualizar a base de ori
 
 ## Sequencia minima
 
-1. Agency cria o workspace:
+1. Admin cria o workspace:
 
 ```
 POST /api/v1/workspaces
@@ -67,7 +68,7 @@ POST /api/v1/workspaces
 }
 ```
 
-2. Cliente publica SPF/DKIM. Agency:
+2. Cliente publica SPF/DKIM/DMARC/CNAME/MX. Admin:
 
 ```
 POST /api/v1/workspaces/{id}/verify-domain
@@ -82,7 +83,7 @@ POST /api/v1/worker/tick
 Authorization: Bearer {MAILON_API_KEY}
 ```
 
-5. Bounce/complaint entram pelo webhook Mailgun. Opt-out entra pelo link publico. Poll `GET /contacts` filtrando `suppressed` se precisar espelhar o status.
+5. Bounce/complaint entram pelo webhook Mailgun **assinado** (`MAILGUN_WEBHOOK_SIGNING_KEY`). Sem HMAC valido o contato nao e suprimido. Opt-out entra pelo link publico. Poll `GET /contacts` filtrando `suppressed` se precisar espelhar o status.
 
 6. Disparo:
 

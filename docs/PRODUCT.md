@@ -8,18 +8,19 @@ Agencia queima o dominio do cliente (ou o proprio) mandando marketing de SMTP co
 
 ## Promessa
 
-1. Agencia provisiona DNS uma vez.
-2. Cliente importa base, monta o HTML, dispara.
+1. Admin provisiona DNS e acessos uma vez.
+2. Cliente informa o email, importa base, monta o HTML, dispara.
 3. Reputacao fica isolada por sending domain, com warmup e suppress automatico.
 
 ## Papeis
 
-| Papel | Login | Pode |
-|---|---|---|
-| Agency | painel `/agency` | criar workspace, colar DNS, verificar dominio, ver saude de todos, impersonar |
-| Workspace | painel `/app` | listas, templates Unlayer, campanhas, sequencias, processar fila |
+| Papel | Login | Pode | Nao pode |
+|---|---|---|---|
+| Admin | painel `/admin` | CRUD de usuarios, criar workspace + sending domain, listar SPF/DKIM/DMARC/CNAME/MX, verificar DNS, impersonar, processar fila, ler jobs/erros/audit | apagar historico; desativar o ultimo admin |
+| Agency | painel `/agency` | ver workspaces e saude da propria agencia | criar dominio, criar/editar acesso, ver logs globais |
+| Workspace | painel `/app` | listas, templates Unlayer, campanhas, sequencias | ver DNS, editar From/dominio, criar usuario |
 
-O modelo ja e multi-agencia. A UI do MVP atende uma agencia e N clientes.
+O modelo ja e multi-agencia. So o admin configura dominio e acesso. O cliente so usa o `/app`.
 
 ## Funcionalidades
 
@@ -104,16 +105,17 @@ Open/click dependem de webhook Mailgun configurado. Bounce/complaint/unsub ja en
 
 ## Contas de preview
 
-- Agency: `xena.w@example.org` / `mailon123`
-- Workspace demo: `olivia.t@example.org` / `aurora123`
-- Workspace Mailgun real (se provisionado): usuario `arcanjo`
+- Admin: `arcanjo` / `29172510` → `/admin`
+- Agency: `xena.w@example.org` / `mailon123` → `/agency`
+- Workspace demo: `olivia.t@example.org` / `aurora123` → `/app`
 
 ## Fluxo do cliente (ops)
 
-1. Agency cria workspace + sending domain.
-2. Cliente cola os records DNS. Agency clica verificar.
-3. Workspace importa XLSX (ou um sistema externo empurra JSON na API).
-4. Monta template no Unlayer, salva.
-5. Cria campanha ou sequencia.
-6. Processar fila (ou cron em `POST /api/v1/worker/tick`).
-7. Bounce/complaint voltam no webhook e saem da base.
+1. Admin cria workspace + sending domain + email de acesso.
+2. Admin entrega os records DNS (SPF, DKIM, DMARC, CNAME, MX) para o cliente colar.
+3. Admin clica verificar. Sem `verified`, nada sai.
+4. Workspace importa XLSX (ou um sistema externo empurra JSON na API).
+5. Monta template no Unlayer, salva.
+6. Cria campanha ou sequencia.
+7. Processar fila (ou cron em `POST /api/v1/worker/tick`).
+8. Bounce/complaint voltam no webhook assinado e saem da base.

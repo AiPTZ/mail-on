@@ -12,20 +12,23 @@ Documentacao:
 
 ## MVP
 
-- Agencia cria workspace e provisiona o sending domain
-- DNS SPF / DKIM / tracking via Mailgun
-- Cliente importa XLSX ou CSV (`email`, `nome`, `tags`)
+- Admin cria workspace, usuario e provisiona o sending domain
+- Agencia so le saude da propria agencia
+- DNS SPF / DKIM / DMARC / CNAME / MX via Mailgun; verificar so no `/admin`
+- Cliente importa XLSX ou CSV (`email`, `nome`, `tags`) e dispara no `/app`
 - Editor Unlayer; HTML fica no Mail ON
 - Campanha one-shot e sequencia de ate 3 emails (enrollment manual)
 - Warmup diario por dominio
 - Bounce, complaint e unsubscribe suprimem o contato
-- REST `/api/v1`
+- REST `/api/v1`; API key = primeiro admin
+- Webhook Mailgun com HMAC; worker so `POST /api/v1/worker/tick`
 - Mailgun em producao; demo se a chave nao existir
 
 ## Preview
 
-- Agency: `xena.w@example.org` / `mailon123`
-- Cliente demo: `olivia.t@example.org` / `aurora123`
+- Admin: `arcanjo` / `29172510` → `/admin`
+- Agency: `xena.w@example.org` / `mailon123` → `/agency`
+- Cliente demo: `olivia.t@example.org` / `aurora123` → `/app`
 - Modelo de planilha: `/modelo-contatos.xlsx`
 
 ## Stack
@@ -54,7 +57,8 @@ curl -X POST http://localhost:3000/api/v1/worker/tick \
   -H "Authorization: Bearer $MAILON_API_KEY"
 ```
 
-Webhook Mailgun: `POST /api/webhooks/mailgun`.
+Webhook Mailgun (HMAC obrigatorio): `POST /api/webhooks/mailgun`.
+`/api/worker/tick` legado responde 404.
 Descadastro: `GET /api/public/unsubscribe?w=&c=`.
 
 ## Regras de dominio

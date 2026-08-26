@@ -5,9 +5,9 @@ App fino em cima do Mailgun. A reputacao mora no Mail ON. O Mailgun e so o MTA.
 ## Vista
 
 ```
-UI Next.js          REST /api/v1           Publico
-/agency  /app   →   src/lib/api-v1.ts  →  /api/webhooks/mailgun
-Server Actions  ↗         │               /api/public/unsubscribe
+UI Next.js                 REST /api/v1           Publico
+/admin  /agency  /app  →   src/lib/api-v1.ts  →  /api/webhooks/mailgun (HMAC)
+Server Actions         ↗         │               /api/public/unsubscribe
                           ▼
                     store JSON
                     data/mailon.json
@@ -37,18 +37,25 @@ Next 16 / React 19 foram abandonados neste ambiente (SIGBUS no SWC). Nao subir d
 ## Tenancy
 
 ```
-Agency
-  └── Workspace          (cliente)
-        ├── SendingDomain   1:1
-        ├── Lists → Contacts
-        ├── Templates
-        ├── Campaigns
-        └── Sequences → Enrollments → Jobs → Events
+Admin (plataforma)
+  └── Agency
+        └── Workspace          (cliente)
+              ├── SendingDomain   1:1 (so admin provisiona/verifica)
+              ├── Users role=workspace (so admin cria/edita/desativa)
+              ├── Lists → Contacts
+              ├── Templates
+              ├── Campaigns
+              └── Sequences → Enrollments → Jobs → Events
+                    + audit[]
 ```
 
-Isolamento: usuario so ve o `workspaceId` da sessao. Agency ve todos da `agencyId`. API key = agency; precisa `X-Workspace-Id` para mutar lista/campanha.
+Isolamento: usuario so ve o `workspaceId` da sessao. Agency ve todos da `agencyId`. Admin ve tudo. API key = primeiro `admin`; precisa `X-Workspace-Id` para mutar lista/campanha.
 
-IDs prefixados: `ag_`, `ws_`, `usr_`, `dom_`, `lst_`, `ct_`, `tpl_`, `cmp_`, `seq_`, `enr_`, `job_`, `evt_`.
+IDs prefixados: `ag_`, `ws_`, `usr_`, `dom_`, `lst_`, `ct_`, `tpl_`, `cmp_`, `seq_`, `enr_`, `job_`, `evt_`, `aud_`.
+
+Usuario tem `status` `active` | `disabled`. Desativado nao autentica. Sem exclusao fisica.
+
+Impersonacao: JWT guarda `adminId` + `impersonating`. Banner no `/app`. Audit registra start/stop.
 
 ## Arquivos que importam
 
@@ -64,7 +71,10 @@ IDs prefixados: `ag_`, `ws_`, `usr_`, `dom_`, `lst_`, `ct_`, `tpl_`, `cmp_`, `se
 | `src/lib/mailgun.ts` | provision / verify / send |
 | `src/lib/csv.ts` | parse XLSX/CSV |
 | `src/app/api/v1/[...path]/route.ts` | HTTP catch-all |
-| `src/middleware.ts` | protege `/agency` e `/app` |
+| `src/lib/audit.ts` | append de AuditEvent |
+| `src/lib/rate-limit.ts` | 5 login/min/IP |
+| `src/lib/mailgun-webhook.ts` | HMAC timestamp+token |
+| `src/middleware.ts` | protege `/admin`, `/agency` e `/app` |
 
 Trocar o store **nao** exige reescrever worker/mailgun/api-v1 se a interface `readDb` / `writeDb` permanecer.
 
@@ -100,20 +110,20 @@ Sequencia: passo `n` so entra na fila se `nextRunAt <= now`. Depois do send, ava
 
 - UI: cookie httpOnly `mailon_session`.
 - API: `Authorization: Bearer`, `X-Api-Key`, ou o mesmo cookie.
-- `MAILON_API_KEY` autentica como o usuario agency da primeira agencia.
-- Agency age num workspace com `X-Workspace-Id` ou `workspaceId` no body.
+- `MAILON_API_KEY` autentica como o primeiro usuario `admin`.
+- Admin/agency age num workspace com `X-Workspace-Id` ou `workspaceId` no body.
+- Login: 5 tentativas / minuto / IP (`429 rate_limited`). Usuario `disabled` = 401.
 
-Nao ha RBAC fino (editor vs viewer). Dois papeis so.
+Tres papeis: `admin`, `agency`, `workspace`. Sem RBAC fino (editor vs viewer).
 
 ## Worker
 
 Nao ha cron no processo. Quem chama:
 
 - botao Processar fila (Server Action)
-- `POST /api/v1/worker/tick` (autenticado)
-- `POST /api/worker/tick` (legado, **sem auth** — nao expor em producao sem lock)
+- `POST /api/v1/worker/tick` (JWT admin/agency ou `MAILON_API_KEY`). Sem GET.
 
-Em producao: cron a cada 1–5 min. Em volume alto (> dezenas de milhares/dia), sair do in-process para fila.
+`/api/worker/tick` legado responde 404. Em producao: cron a cada 1–5 min. Em volume alto (> dezenas de milhares/dia), sair do in-process para fila.
 
 ## Mailgun
 
@@ -129,7 +139,7 @@ EU: `https://api.eu.mailgun.net`.
 
 Sem `MAILGUN_API_KEY`: modo demo (DNS fake, `providerId` `demo_*`). Util em staging. Inutil em producao.
 
-O webhook atual **nao valida assinatura**. Antes de producao, checar `MAILGUN_WEBHOOK_SIGNING_KEY`. Eventos tratados: `bounced`, `failed`, `complained`, `unsubscribed`.
+Webhook exige HMAC SHA256 de `timestamp + token` com `MAILGUN_WEBHOOK_SIGNING_KEY`. Sem chave ou assinatura invalida / replay > 5 min → `401 invalid_signature`. Eventos tratados: `bounced`, `failed`, `complained`, `unsubscribed`.
 
 ## Persistencia
 
@@ -147,4 +157,4 @@ Script `https://editor.unlayer.com/embed.js`. Init com `minHeight` calculado. O 
 npm test
 ```
 
-Cobre login, 401, create workspace, 403 de workspace criando workspace, campanha blocked, suppress que nao reativa, API key, health/warmup, agency key + `workspaceId`.
+Cobre login admin, disabled, 401, create workspace `admin_only`, campanha blocked, suppress que nao reativa, API key como admin, health/warmup, jobs/audit, worker sem token, GET tick 404, HMAC Mailgun.
