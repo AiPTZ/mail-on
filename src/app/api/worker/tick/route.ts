@@ -1,12 +1,9 @@
 import { NextResponse } from "next/server";
-import { tickWorker } from "@/lib/worker";
 
 export async function POST() {
-  const result = await tickWorker();
-  return NextResponse.json(result);
+  return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 }
 
 export async function GET() {
-  const result = await tickWorker();
-  return NextResponse.json(result);
+  return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 }

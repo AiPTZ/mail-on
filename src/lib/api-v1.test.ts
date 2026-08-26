@@ -312,6 +312,20 @@ async function run() {
     assert(res.status === 404, "no get");
   });
 
+  await test("mailgun signature rejects missing or stale hmac", async () => {
+    const { verifyMailgunSignature } = await import("./mailgun-webhook");
+    assert(verifyMailgunSignature({ timestamp: "1", token: "t", signature: "x", key: "k" }) === false, "bad hmac");
+    const now = Math.floor(Date.now() / 1000);
+    assert(
+      verifyMailgunSignature({ timestamp: String(now - 400), token: "t", signature: "x", key: "k", now }) === false,
+      "stale",
+    );
+    const { createHmac } = await import("crypto");
+    const ts = String(now);
+    const signature = createHmac("sha256", "secret").update(ts + "tok").digest("hex");
+    assert(verifyMailgunSignature({ timestamp: ts, token: "tok", signature, key: "secret", now }) === true, "valid");
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed) process.exit(1);
 }
