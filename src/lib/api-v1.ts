@@ -1,9 +1,11 @@
 import bcrypt from "bcryptjs";
+import { appendAudit } from "./audit";
 import { signUserToken, verifyUserToken } from "./auth";
 import { nid } from "./ids";
 import { provisionDomain, verifyDomainRemote } from "./mailgun";
+import { checkLoginRate } from "./rate-limit";
 import { demoDns, emptyStats, findUserByEmail, readDb, writeDb } from "./store";
-import type { SessionUser } from "./types";
+import type { SessionUser, UserRole, UserStatus } from "./types";
 import { enrollList, queueCampaign, tickWorker } from "./worker";
 import { warmupCapForDay } from "./warmup";
 
@@ -39,7 +41,7 @@ function sessionFromUser(user: {
   workspaceId?: string;
   email: string;
   name: string;
-  role: "agency" | "workspace";
+  role: UserRole;
 }): SessionUser {
   return {
     id: user.id,
@@ -51,13 +53,16 @@ function sessionFromUser(user: {
   };
 }
 
-export async function login(input: { email: string; password: string }): Promise<ApiResult> {
+export async function login(input: { email: string; password: string; ip?: string }): Promise<ApiResult> {
+  if (input.ip && !checkLoginRate(input.ip)) return fail(429, "rate_limited");
   const user = findUserByEmail(input.email || "");
   if (!user || !bcrypt.compareSync(input.password || "", user.passwordHash)) {
     return fail(401, "invalid_credentials");
   }
+  if (user.status === "disabled") return fail(401, "disabled");
   const session = sessionFromUser(user);
   const token = await signUserToken(session);
+  writeDb((db) => appendAudit(db, { actorUserId: user.id, action: "login" }));
   return ok({ token, user: session });
 }
 
@@ -66,15 +71,17 @@ export async function authenticate(token: string | null): Promise<SessionUser | 
   const apiKey = process.env.MAILON_API_KEY || "";
   if (apiKey && token === apiKey) {
     const db = readDb();
-    const agency = db.agencies[0];
-    const user = db.users.find((u) => u.role === "agency" && u.agencyId === agency?.id) || db.users.find((u) => u.role === "agency");
-    if (!agency || !user) return null;
+    const user =
+      db.users.find((u) => u.role === "admin" && u.status !== "disabled") ||
+      db.users.find((u) => u.role === "agency");
+    if (!user) return null;
     return sessionFromUser(user);
   }
   return verifyUserToken(token);
 }
 
 function canAccessWorkspace(session: SessionUser, workspaceId: string) {
+  if (session.role === "admin") return true;
   if (session.role === "agency") {
     const ws = readDb().workspaces.find((w) => w.id === workspaceId);
     return Boolean(ws && ws.agencyId === session.agencyId);
@@ -89,14 +96,19 @@ function requireWorkspace(
 ): ApiResult | { workspaceId: string } {
   if (session.role === "workspace" && session.workspaceId) return { workspaceId: session.workspaceId };
   const workspaceId = hint || String(body?.workspaceId || "");
-  if (session.role === "agency" && workspaceId && canAccessWorkspace(session, workspaceId)) {
+  if ((session.role === "admin" || session.role === "agency") && workspaceId && canAccessWorkspace(session, workspaceId)) {
     return { workspaceId };
   }
   return fail(403, "workspace_required");
 }
 
+function requireAdmin(session: SessionUser) {
+  if (session.role !== "admin") return fail(403, "admin_only");
+  return null;
+}
+
 async function createWorkspace(session: SessionUser, body: Record<string, unknown>) {
-  if (session.role !== "agency") return fail(403, "agency_only");
+  if (session.role !== "admin") return fail(403, "admin_only");
   const name = String(body.name || "").trim();
   const email = String(body.email || "").trim().toLowerCase();
   const password = String(body.password || "cliente123");
@@ -124,7 +136,14 @@ async function createWorkspace(session: SessionUser, body: Record<string, unknow
       email,
       name,
       role: "workspace",
+      status: "active",
       passwordHash: bcrypt.hashSync(password, 10),
+    });
+    appendAudit(db, {
+      actorUserId: session.id,
+      action: "domain.provision",
+      workspaceId: workspace.id,
+      targetUserId: db.users[db.users.length - 1]?.id,
     });
     db.domains.push({
       id: nid("dom"),
@@ -164,7 +183,7 @@ async function createWorkspace(session: SessionUser, body: Record<string, unknow
 }
 
 async function verifyWorkspaceDomain(session: SessionUser, workspaceId: string) {
-  if (session.role !== "agency") return fail(403, "agency_only");
+  if (session.role !== "admin") return fail(403, "admin_only");
   if (!canAccessWorkspace(session, workspaceId)) return fail(404, "not_found");
   const domain = readDb().domains.find((d) => d.workspaceId === workspaceId);
   if (!domain) return fail(404, "domain_not_found");
@@ -174,6 +193,12 @@ async function verifyWorkspaceDomain(session: SessionUser, workspaceId: string) 
     if (!row) return;
     row.status = verified ? "verified" : "failed";
     if (verified) row.verifiedAt = new Date().toISOString();
+    appendAudit(db, {
+      actorUserId: session.id,
+      action: "domain.verify",
+      workspaceId,
+      meta: { status: row.status },
+    });
   });
   return ok({ domain: readDb().domains.find((d) => d.id === domain.id) });
 }
@@ -404,8 +429,130 @@ async function enrollSequence(session: SessionUser, sequenceId: string, body: Re
   return ok({ sequence: readDb().sequences.find((s) => s.id === sequenceId) });
 }
 
-function publicUser(user: { id: string; email: string; name: string; role: string; workspaceId?: string }) {
-  return { id: user.id, email: user.email, name: user.name, role: user.role, workspaceId: user.workspaceId };
+function publicUser(user: { id: string; email: string; name: string; role: string; workspaceId?: string; status?: string }) {
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    workspaceId: user.workspaceId,
+    status: user.status || "active",
+  };
+}
+
+function parseRole(value: unknown): UserRole | null {
+  if (value === "admin" || value === "agency" || value === "workspace") return value;
+  return null;
+}
+
+function listUsers(session: SessionUser) {
+  const denied = requireAdmin(session);
+  if (denied) return denied;
+  return ok({ users: readDb().users.map(publicUser) });
+}
+
+function createUser(session: SessionUser, body: Record<string, unknown>) {
+  const denied = requireAdmin(session);
+  if (denied) return denied;
+  const name = String(body.name || "").trim();
+  const email = String(body.email || "").trim().toLowerCase();
+  const password = String(body.password || "");
+  const role = parseRole(body.role) || "workspace";
+  const workspaceId = body.workspaceId ? String(body.workspaceId) : undefined;
+  const status: UserStatus = body.status === "disabled" ? "disabled" : "active";
+  if (!name || !email || !password) return fail(400, "missing_fields");
+  if (findUserByEmail(email)) return fail(409, "email_taken");
+  if (role === "workspace" && workspaceId && !readDb().workspaces.find((w) => w.id === workspaceId)) {
+    return fail(404, "not_found");
+  }
+  let userId = "";
+  writeDb((db) => {
+    const user = {
+      id: nid("usr"),
+      agencyId: session.agencyId || db.agencies[0]?.id || "",
+      workspaceId: role === "workspace" ? workspaceId : undefined,
+      email,
+      name,
+      role,
+      status,
+      passwordHash: bcrypt.hashSync(password, 10),
+    };
+    userId = user.id;
+    db.users.push(user);
+    appendAudit(db, { actorUserId: session.id, action: "user.create", targetUserId: user.id });
+  });
+  return ok({ user: publicUser(readDb().users.find((u) => u.id === userId)!) }, 201);
+}
+
+function getUser(session: SessionUser, userId: string) {
+  const denied = requireAdmin(session);
+  if (denied) return denied;
+  const user = readDb().users.find((u) => u.id === userId);
+  if (!user) return fail(404, "not_found");
+  return ok({ user: publicUser(user) });
+}
+
+function updateUser(session: SessionUser, userId: string, body: Record<string, unknown>) {
+  const denied = requireAdmin(session);
+  if (denied) return denied;
+  const db = readDb();
+  const user = db.users.find((u) => u.id === userId);
+  if (!user) return fail(404, "not_found");
+  if (body.status === "disabled" && user.role === "admin") {
+    const activeAdmins = db.users.filter((u) => u.role === "admin" && u.status !== "disabled" && u.id !== userId);
+    if (activeAdmins.length === 0) return fail(400, "last_admin");
+  }
+  writeDb((store) => {
+    const row = store.users.find((u) => u.id === userId);
+    if (!row) return;
+    if (body.name) row.name = String(body.name).trim();
+    if (body.email) row.email = String(body.email).trim().toLowerCase();
+    if (body.password) row.passwordHash = bcrypt.hashSync(String(body.password), 10);
+    if (body.role) {
+      const role = parseRole(body.role);
+      if (role) row.role = role;
+    }
+    if (body.workspaceId !== undefined) {
+      row.workspaceId = body.workspaceId ? String(body.workspaceId) : undefined;
+    }
+    if (body.status === "active" || body.status === "disabled") row.status = body.status;
+    appendAudit(store, {
+      actorUserId: session.id,
+      action: body.status === "disabled" ? "user.disable" : "user.update",
+      targetUserId: row.id,
+    });
+  });
+  return ok({ user: publicUser(readDb().users.find((u) => u.id === userId)!) });
+}
+
+function listJobs(session: SessionUser, body: Record<string, unknown>, hint?: string) {
+  const denied = requireAdmin(session);
+  if (denied) return denied;
+  const workspaceId = hint || String(body.workspaceId || "");
+  const status = String(body.status || "");
+  const type = String(body.type || "");
+  let jobs = readDb().jobs;
+  if (workspaceId) jobs = jobs.filter((j) => j.workspaceId === workspaceId);
+  if (status) jobs = jobs.filter((j) => j.status === status);
+  if (type) jobs = jobs.filter((j) => j.type === type);
+  return ok({ jobs });
+}
+
+function listEvents(session: SessionUser, body: Record<string, unknown>, hint?: string) {
+  const denied = requireAdmin(session);
+  if (denied) return denied;
+  const workspaceId = hint || String(body.workspaceId || "");
+  const type = String(body.type || "");
+  let events = readDb().events;
+  if (workspaceId) events = events.filter((e) => e.workspaceId === workspaceId);
+  if (type) events = events.filter((e) => e.type === type);
+  return ok({ events });
+}
+
+function listAudit(session: SessionUser) {
+  const denied = requireAdmin(session);
+  if (denied) return denied;
+  return ok({ audit: readDb().audit });
 }
 
 export async function handle(
@@ -413,7 +560,7 @@ export async function handle(
   path: string,
   body: unknown,
   token: string | null,
-  ctx?: { workspaceId?: string },
+  ctx?: { workspaceId?: string; ip?: string },
 ): Promise<ApiResult> {
   const verb = method.toUpperCase();
   const pathname = path.startsWith("/") ? path : `/${path}`;
@@ -421,7 +568,11 @@ export async function handle(
   const workspaceHint = ctx?.workspaceId;
 
   if (verb === "POST" && pathname === "/auth/login") {
-    return login({ email: String(payload.email || ""), password: String(payload.password || "") });
+    return login({
+      email: String(payload.email || ""),
+      password: String(payload.password || ""),
+      ip: ctx?.ip,
+    });
   }
 
   const session = await authenticate(token);
@@ -433,12 +584,25 @@ export async function handle(
     return ok({ user: publicUser(session) });
   }
 
+  if (verb === "GET" && pathname === "/users") return listUsers(session);
+  if (verb === "POST" && pathname === "/users") return createUser(session, payload);
+  if (parts[0] === "users" && parts[1] && !parts[2]) {
+    if (verb === "GET") return getUser(session, parts[1]);
+    if (verb === "PATCH" || verb === "PUT") return updateUser(session, parts[1], payload);
+  }
+
+  if (verb === "GET" && pathname === "/jobs") return listJobs(session, payload, workspaceHint);
+  if (verb === "GET" && pathname === "/events") return listEvents(session, payload, workspaceHint);
+  if (verb === "GET" && pathname === "/audit") return listAudit(session);
+
   if (verb === "GET" && pathname === "/workspaces") {
     const db = readDb();
     const workspaces =
-      session.role === "agency"
-        ? db.workspaces.filter((w) => w.agencyId === session.agencyId)
-        : db.workspaces.filter((w) => w.id === session.workspaceId);
+      session.role === "admin"
+        ? db.workspaces
+        : session.role === "agency"
+          ? db.workspaces.filter((w) => w.agencyId === session.agencyId)
+          : db.workspaces.filter((w) => w.id === session.workspaceId);
     return ok({ workspaces });
   }
 
@@ -546,8 +710,10 @@ export async function handle(
     if (verb === "POST" && parts[2] === "enroll") return enrollSequence(session, parts[1], payload, workspaceHint);
   }
 
-  if ((verb === "POST" || verb === "GET") && pathname === "/worker/tick") {
+  if (verb === "POST" && pathname === "/worker/tick") {
+    if (session.role !== "admin" && session.role !== "agency") return fail(403, "admin_only");
     const result = await tickWorker();
+    writeDb((db) => appendAudit(db, { actorUserId: session.id, action: "worker.tick" }));
     return ok(result);
   }
 

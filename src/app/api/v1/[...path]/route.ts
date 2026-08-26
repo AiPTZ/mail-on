@@ -30,6 +30,7 @@ async function run(request: NextRequest, path: string[]) {
   }
   const result = await handle(request.method, `/${path.join("/")}`, body, tokenFrom(request), {
     workspaceId: request.headers.get("x-workspace-id") || undefined,
+    ip: request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || undefined,
   });
   return json(result);
 }

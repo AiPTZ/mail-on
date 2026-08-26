@@ -111,8 +111,19 @@ async function run() {
     assert(res.status === 401, `expected 401 got ${res.status}`);
   });
 
-  await test("agency creates workspace with pending domain", async () => {
+  await test("agency cannot create workspace", async () => {
     const { data } = await api.login({ email: "xena.w@example.org", password: "mailon123" });
+    const res = await api.handle(
+      "POST",
+      "/workspaces",
+      { name: "X", email: "x@x.com", password: "pw", domain: "mail.x.com" },
+      data!.token,
+    );
+    assert(res.status === 403 && res.error === "admin_only", "agency blocked");
+  });
+
+  await test("admin creates workspace with pending domain", async () => {
+    const { data } = await api.login({ email: "arcanjo", password: "29172510" });
     const res = await api.handle(
       "POST",
       "/workspaces",
@@ -133,7 +144,7 @@ async function run() {
   });
 
   await test("workspace cannot create another workspace", async () => {
-    const { data } = await api.login({ email: "xena.w@example.org", password: "mailon123" });
+    const { data } = await api.login({ email: "arcanjo", password: "29172510" });
     const created = await api.handle(
       "POST",
       "/workspaces",
@@ -147,12 +158,12 @@ async function run() {
       { name: "B", email: "b@b.com", password: "pw", domain: "mail.b.com" },
       wsLogin.data!.token,
     );
-    assert(res.status === 403, `expected 403 got ${res.status}`);
+    assert(res.status === 403 && res.error === "admin_only", `expected 403 admin_only got ${res.status} ${res.error}`);
     void created;
   });
 
   await test("campaign is blocked when domain is not verified", async () => {
-    const { data } = await api.login({ email: "xena.w@example.org", password: "mailon123" });
+    const { data } = await api.login({ email: "arcanjo", password: "29172510" });
     const ws = await api.handle(
       "POST",
       "/workspaces",
@@ -191,7 +202,7 @@ async function run() {
   });
 
   await test("does not reactivate suppressed contact on import", async () => {
-    const { data } = await api.login({ email: "xena.w@example.org", password: "mailon123" });
+    const { data } = await api.login({ email: "arcanjo", password: "29172510" });
     await api.handle(
       "POST",
       "/workspaces",
@@ -224,14 +235,16 @@ async function run() {
     assert(ana.crmContactId === "crm_1", "crm id kept");
   });
 
-  await test("api key authenticates as agency", async () => {
+  await test("api key authenticates as admin", async () => {
     const res = await api.handle("GET", "/workspaces", {}, "partner-key-test");
     assert(res.ok, res.error);
     assert(Array.isArray((res.data as { workspaces: unknown[] })?.workspaces), "workspaces list");
+    const me = await api.handle("GET", "/me", {}, "partner-key-test");
+    assert((me.data as { user: { role: string } }).user.role === "admin", "api key is admin");
   });
 
-  await test("agency api key can act on a workspace via workspaceId", async () => {
-    const { data } = await api.login({ email: "xena.w@example.org", password: "mailon123" });
+  await test("admin api key can act on a workspace via workspaceId", async () => {
+    const { data } = await api.login({ email: "arcanjo", password: "29172510" });
     const ws = await api.handle(
       "POST",
       "/workspaces",
@@ -250,7 +263,7 @@ async function run() {
   });
 
   await test("health returns warmup cap", async () => {
-    const { data } = await api.login({ email: "xena.w@example.org", password: "mailon123" });
+    const { data } = await api.login({ email: "arcanjo", password: "29172510" });
     const ws = await api.handle(
       "POST",
       "/workspaces",
@@ -262,6 +275,41 @@ async function run() {
     assert(health.ok, health.error);
     assert(health.data?.health.dailyCap === 50, `day1 cap expected 50 got ${health.data?.health.dailyCap}`);
     assert(health.data?.health.status === "pending", "pending");
+  });
+
+  await test("disabled user cannot login", async () => {
+    const { writeDb } = await import("./store");
+    writeDb((db) => {
+      const admin = db.users.find((u) => u.email.startsWith("arcanjo"));
+      if (admin) admin.status = "disabled";
+    });
+    const res = await api.login({ email: "arcanjo", password: "29172510" });
+    assert(res.ok === false && res.status === 401, "disabled");
+  });
+
+  await test("admin creates user and lists jobs and audit", async () => {
+    const { data } = await api.login({ email: "arcanjo", password: "29172510" });
+    const userRes = await api.handle(
+      "POST",
+      "/users",
+      { name: "Cli", email: "cli@x.com", password: "pw", role: "workspace" },
+      data!.token,
+    );
+    assert(userRes.ok, `create user ${userRes.error}`);
+    const jobs = await api.handle("GET", "/jobs", {}, data!.token);
+    const audit = await api.handle("GET", "/audit", {}, data!.token);
+    assert(jobs.ok && audit.ok, "lists");
+  });
+
+  await test("worker tick without token is 401", async () => {
+    const res = await api.handle("POST", "/worker/tick", {}, null);
+    assert(res.status === 401, "unauthenticated");
+  });
+
+  await test("worker GET tick is 404", async () => {
+    const { data } = await api.login({ email: "arcanjo", password: "29172510" });
+    const res = await api.handle("GET", "/worker/tick", {}, data!.token);
+    assert(res.status === 404, "no get");
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);
