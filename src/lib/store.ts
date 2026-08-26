@@ -3,6 +3,7 @@ import { dirname, join } from "path";
 import bcrypt from "bcryptjs";
 import type {
   Agency,
+  AuditEvent,
   Campaign,
   Contact,
   ContactList,

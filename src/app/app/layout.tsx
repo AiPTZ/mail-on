@@ -15,7 +15,9 @@ const items = [
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const session = await getSession();
   if (!session) redirect("/login");
-  if (session.role !== "workspace" || !session.workspaceId) redirect("/agency");
+  if (!session.workspaceId || (session.role !== "workspace" && !session.impersonating)) {
+    redirect(session.role === "admin" ? "/admin" : "/agency");
+  }
   return (
     <Shell user={session} items={items} title="Workspace do cliente" cta={{ href: "/app/campaigns/new", label: "Nova campanha" }}>
       {children}

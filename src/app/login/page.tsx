@@ -84,8 +84,7 @@ export default function LoginPage({
           </form>
 
           <div className="mt-5 space-y-2 border-t border-ink-400 pt-5 text-xs leading-6 text-cream/40">
-            <p>Usuario: arcanjo</p>
-            <p>Agencia: xena.w@example.org / mailon123</p>
+            <p>Admin: arcanjo</p>
           </div>
         </div>
 

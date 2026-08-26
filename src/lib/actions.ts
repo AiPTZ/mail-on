@@ -3,19 +3,27 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import bcrypt from "bcryptjs";
+import { appendAudit } from "./audit";
 import { createSession, destroySession, getSession } from "./auth";
 import { parseContactFile } from "./csv";
 import { nid } from "./ids";
 import { provisionDomain, verifyDomainRemote } from "./mailgun";
-import { demoDns, emptyStats, findUserByEmail, writeDb } from "./store";
+import { demoDns, emptyStats, findUserByEmail, readDb, writeDb } from "./store";
+import type { UserRole, UserStatus } from "./types";
 import { enrollList, queueCampaign, tickWorker } from "./worker";
 import { warmupCapForDay } from "./warmup";
+
+function homeFor(role: UserRole) {
+  if (role === "admin") return "/admin";
+  if (role === "agency") return "/agency";
+  return "/app";
+}
 
 export async function loginAction(formData: FormData) {
   const email = String(formData.get("email") || "").trim();
   const password = String(formData.get("password") || "");
   const user = findUserByEmail(email);
-  if (!user || !bcrypt.compareSync(password, user.passwordHash)) {
+  if (!user || user.status === "disabled" || !bcrypt.compareSync(password, user.passwordHash)) {
     redirect("/login?error=1");
   }
   await createSession({
@@ -26,7 +34,8 @@ export async function loginAction(formData: FormData) {
     name: user.name,
     role: user.role,
   });
-  redirect(user.role === "agency" ? "/agency" : "/app");
+  writeDb((db) => appendAudit(db, { actorUserId: user.id, action: "login" }));
+  redirect(homeFor(user.role));
 }
 
 export async function logoutAction() {
@@ -36,14 +45,14 @@ export async function logoutAction() {
 
 export async function createWorkspaceAction(formData: FormData) {
   const session = await getSession();
-  if (!session || session.role !== "agency") redirect("/login");
+  if (!session || session.role !== "admin") redirect("/login");
 
   const name = String(formData.get("name") || "").trim();
   const email = String(formData.get("email") || "").trim().toLowerCase();
   const password = String(formData.get("password") || "cliente123");
   const domainName = String(formData.get("domain") || "").trim().toLowerCase();
   const fromName = String(formData.get("fromName") || name).trim();
-  if (!name || !email || !domainName) redirect("/agency?error=missing");
+  if (!name || !email || !domainName) redirect("/admin/workspaces/new?error=missing");
 
   const slug = name
     .toLowerCase()
@@ -70,7 +79,13 @@ export async function createWorkspaceAction(formData: FormData) {
       email,
       name,
       role: "workspace",
+      status: "active",
       passwordHash: bcrypt.hashSync(password, 10),
+    });
+    appendAudit(db, {
+      actorUserId: session.id,
+      action: "domain.provision",
+      workspaceId: workspace.id,
     });
     db.domains.push({
       id: nid("dom"),
@@ -99,12 +114,12 @@ export async function createWorkspaceAction(formData: FormData) {
     // demo DNS already stored
   }
 
-  redirect(`/agency/workspaces/${workspaceId}`);
+  redirect(`/admin/workspaces/${workspaceId}`);
 }
 
 export async function verifyDomainAction(workspaceId: string) {
   const session = await getSession();
-  if (!session || session.role !== "agency") redirect("/login");
+  if (!session || session.role !== "admin") redirect("/login");
 
   writeDb((db) => {
     const domain = db.domains.find((d) => d.workspaceId === workspaceId);
@@ -122,14 +137,21 @@ export async function verifyDomainAction(workspaceId: string) {
     if (!row) return;
     row.status = ok ? "verified" : "failed";
     if (ok) row.verifiedAt = new Date().toISOString();
+    appendAudit(store, {
+      actorUserId: session.id,
+      action: "domain.verify",
+      workspaceId,
+      meta: { status: row.status },
+    });
   });
-  revalidatePath(`/agency/workspaces/${workspaceId}`);
-  revalidatePath("/agency");
+  revalidatePath(`/admin/workspaces/${workspaceId}`);
+  revalidatePath("/admin/workspaces");
+  revalidatePath("/admin");
 }
 
 export async function updateFromAction(formData: FormData) {
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session || (session.role !== "admin" && !session.impersonating)) redirect("/login");
   const workspaceId = session.workspaceId || String(formData.get("workspaceId") || "");
   const fromName = String(formData.get("fromName") || "").trim();
   const local = String(formData.get("fromLocal") || "ola").trim();
@@ -321,25 +343,122 @@ export async function startSequenceAction(formData: FormData) {
 export async function processQueueAction() {
   const session = await getSession();
   if (!session) redirect("/login");
+  if (session.role !== "admin" && session.role !== "agency" && !session.impersonating) redirect("/login");
   await tickWorker();
-  revalidatePath(session.role === "agency" ? "/agency" : "/app");
+  writeDb((db) => appendAudit(db, { actorUserId: session.adminId || session.id, action: "worker.tick" }));
+  revalidatePath(session.role === "admin" ? "/admin" : session.role === "agency" ? "/agency" : "/app");
 }
 
 export async function impersonateWorkspace(workspaceId: string) {
   const session = await getSession();
-  if (!session || session.role !== "agency") redirect("/login");
-  const { readDb } = await import("./store");
-  const user = readDb().users.find(
-    (u) => u.workspaceId === workspaceId && u.role === "workspace",
-  );
-  if (!user) redirect("/agency");
+  if (!session || session.role !== "admin") redirect("/login");
+  const db = readDb();
+  const workspace = db.workspaces.find((w) => w.id === workspaceId);
+  if (!workspace) redirect("/admin/workspaces");
+  const user = db.users.find((u) => u.workspaceId === workspaceId && u.role === "workspace" && u.status !== "disabled");
   await createSession({
-    id: user.id,
-    agencyId: user.agencyId,
-    workspaceId: user.workspaceId,
-    email: user.email,
-    name: user.name,
+    id: user?.id || session.id,
+    agencyId: workspace.agencyId,
+    workspaceId: workspace.id,
+    email: user?.email || session.email,
+    name: workspace.name,
     role: "workspace",
+    adminId: session.id,
+    impersonating: true,
   });
+  writeDb((store) =>
+    appendAudit(store, {
+      actorUserId: session.id,
+      action: "impersonate.start",
+      workspaceId,
+      targetUserId: user?.id,
+    }),
+  );
   redirect("/app");
+}
+
+export async function stopImpersonationAction() {
+  const session = await getSession();
+  if (!session?.impersonating || !session.adminId) redirect("/login");
+  const admin = readDb().users.find((u) => u.id === session.adminId && u.role === "admin");
+  if (!admin || admin.status === "disabled") {
+    await destroySession();
+    redirect("/login");
+  }
+  writeDb((db) =>
+    appendAudit(db, {
+      actorUserId: admin.id,
+      action: "impersonate.stop",
+      workspaceId: session.workspaceId,
+    }),
+  );
+  await createSession({
+    id: admin.id,
+    agencyId: admin.agencyId,
+    workspaceId: admin.workspaceId,
+    email: admin.email,
+    name: admin.name,
+    role: "admin",
+  });
+  redirect("/admin");
+}
+
+export async function createUserAction(formData: FormData) {
+  const session = await getSession();
+  if (!session || session.role !== "admin") redirect("/login");
+  const name = String(formData.get("name") || "").trim();
+  const email = String(formData.get("email") || "").trim().toLowerCase();
+  const password = String(formData.get("password") || "");
+  const role = (String(formData.get("role") || "workspace") as UserRole);
+  const workspaceId = String(formData.get("workspaceId") || "") || undefined;
+  if (!name || !email || !password) redirect("/admin/users/new?error=missing");
+  if (findUserByEmail(email)) redirect("/admin/users/new?error=taken");
+  writeDb((db) => {
+    const user = {
+      id: nid("usr"),
+      agencyId: session.agencyId || db.agencies[0]?.id || "",
+      workspaceId: role === "workspace" ? workspaceId : undefined,
+      email,
+      name,
+      role: (role === "admin" || role === "agency" ? role : "workspace") as UserRole,
+      status: "active" as UserStatus,
+      passwordHash: bcrypt.hashSync(password, 10),
+    };
+    db.users.push(user);
+    appendAudit(db, { actorUserId: session.id, action: "user.create", targetUserId: user.id });
+  });
+  redirect("/admin/users");
+}
+
+export async function updateUserAction(formData: FormData) {
+  const session = await getSession();
+  if (!session || session.role !== "admin") redirect("/login");
+  const userId = String(formData.get("userId") || "");
+  const name = String(formData.get("name") || "").trim();
+  const email = String(formData.get("email") || "").trim().toLowerCase();
+  const password = String(formData.get("password") || "");
+  const role = String(formData.get("role") || "") as UserRole;
+  const workspaceId = String(formData.get("workspaceId") || "") || undefined;
+  const status = String(formData.get("status") || "active") as UserStatus;
+  writeDb((db) => {
+    const row = db.users.find((u) => u.id === userId);
+    if (!row) return;
+    if (status === "disabled" && row.role === "admin") {
+      const others = db.users.filter((u) => u.role === "admin" && u.status !== "disabled" && u.id !== userId);
+      if (others.length === 0) return;
+    }
+    if (name) row.name = name;
+    if (email) row.email = email;
+    if (password) row.passwordHash = bcrypt.hashSync(password, 10);
+    if (role === "admin" || role === "agency" || role === "workspace") row.role = role;
+    row.workspaceId = row.role === "workspace" ? workspaceId : undefined;
+    if (status === "active" || status === "disabled") row.status = status;
+    appendAudit(db, {
+      actorUserId: session.id,
+      action: status === "disabled" ? "user.disable" : "user.update",
+      targetUserId: row.id,
+    });
+  });
+  revalidatePath("/admin/users");
+  redirect("/admin/users");
 }

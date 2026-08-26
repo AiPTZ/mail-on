@@ -10,18 +10,24 @@ import {
   Mail,
   Menu,
   Plus,
+  ScrollText,
+  Shield,
   Users,
   Workflow,
   X,
   type LucideIcon,
 } from "lucide-react";
-import { logoutAction, processQueueAction } from "@/lib/actions";
+import { logoutAction, processQueueAction, stopImpersonationAction } from "@/lib/actions";
 import type { SessionUser } from "@/lib/types";
 import { Logo } from "./logo";
 import { NavLink } from "./nav-link";
 import { Button } from "./ui";
 
 const ICONS: Record<string, LucideIcon> = {
+  "/admin": Shield,
+  "/admin/users": Users,
+  "/admin/workspaces": Building2,
+  "/admin/logs": ScrollText,
   "/agency": Building2,
   "/agency/new": Plus,
   "/app": LayoutDashboard,
@@ -54,7 +60,7 @@ function SidebarContent({
             href={item.href}
             label={item.label}
             icon={ICONS[item.href] || List}
-            end={item.href === "/agency" || item.href === "/app"}
+            end={item.href === "/agency" || item.href === "/app" || item.href === "/admin"}
             onClick={onNavigate}
           />
         ))}
@@ -141,6 +147,16 @@ export function Shell({
 
       <main className="px-4 py-6 sm:px-6 lg:ml-64 lg:px-10 lg:py-8">
         <div className="mx-auto max-w-[88rem]">
+          {user.impersonating ? (
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gold-500/40 bg-gold-500/10 px-4 py-3">
+              <p className="text-sm text-gold-100">Operando como {user.name}</p>
+              <form action={stopImpersonationAction}>
+                <Button variant="line" type="submit">
+                  Voltar ao admin
+                </Button>
+              </form>
+            </div>
+          ) : null}
           <p className="mb-4 hidden text-xs uppercase tracking-[0.18em] text-cream/35 lg:block">{title}</p>
           {children}
         </div>

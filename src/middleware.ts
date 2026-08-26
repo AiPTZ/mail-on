@@ -9,7 +9,7 @@ function secret() {
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const needsAuth = pathname.startsWith("/agency") || pathname.startsWith("/app");
+  const needsAuth = pathname.startsWith("/agency") || pathname.startsWith("/app") || pathname.startsWith("/admin");
   if (!needsAuth) return NextResponse.next();
 
   const token = request.cookies.get(COOKIE)?.value;
@@ -19,11 +19,18 @@ export async function middleware(request: NextRequest) {
 
   try {
     const { payload } = await jwtVerify(token, secret());
-    if (pathname.startsWith("/agency") && payload.role !== "agency") {
-      return NextResponse.redirect(new URL("/app", request.url));
+    const role = payload.role;
+    const impersonating = payload.impersonating === true;
+
+    if (pathname.startsWith("/admin") && role !== "admin") {
+      if (impersonating) return NextResponse.redirect(new URL("/app", request.url));
+      return NextResponse.redirect(new URL(role === "agency" ? "/agency" : "/app", request.url));
     }
-    if (pathname.startsWith("/app") && payload.role !== "workspace") {
-      return NextResponse.redirect(new URL("/agency", request.url));
+    if (pathname.startsWith("/agency") && role !== "agency") {
+      return NextResponse.redirect(new URL(role === "admin" ? "/admin" : "/app", request.url));
+    }
+    if (pathname.startsWith("/app") && role !== "workspace" && !impersonating) {
+      return NextResponse.redirect(new URL(role === "admin" ? "/admin" : "/agency", request.url));
     }
     return NextResponse.next();
   } catch {
@@ -32,5 +39,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/agency/:path*", "/app/:path*"],
+  matcher: ["/agency/:path*", "/app/:path*", "/admin/:path*"],
 };
