@@ -18,11 +18,21 @@ function emptyDb(): Database {
     agencies: [{ id: "ag_1", name: "Mail ON Agency", slug: "mailon" }],
     users: [
       {
+        id: "usr_admin",
+        agencyId: "ag_1",
+        email: "arcanjo@mg.aiptz.com.br",
+        name: "Arcanjo",
+        role: "admin",
+        status: "active",
+        passwordHash: bcrypt.hashSync("29172510", 10),
+      },
+      {
         id: "usr_agency",
         agencyId: "ag_1",
         email: "xena.w@example.org",
         name: "Ops",
         role: "agency",
+        status: "active",
         passwordHash: bcrypt.hashSync("mailon123", 10),
       },
     ],
@@ -36,6 +46,7 @@ function emptyDb(): Database {
     enrollments: [],
     jobs: [],
     events: [],
+    audit: [],
   };
 }
 
@@ -84,6 +95,15 @@ async function run() {
     const res = await api.login({ email: "xena.w@example.org", password: "mailon123" });
     assert(res.ok === true, "expected login ok");
     assert(res.data?.token && res.data.user.role === "agency", "expected token + agency user");
+  });
+
+  await test("arcanjo login is admin", async () => {
+    const res = await api.login({ email: "arcanjo", password: "29172510" });
+    assert(res.ok === true, "expected admin login");
+    assert(res.data?.user.role === "admin", "expected admin role");
+    const me = await api.handle("GET", "/me", {}, tokenOf(res));
+    assert(me.ok, me.error);
+    assert((me.data as { user: { role: string } }).user.role === "admin", "jwt must keep admin");
   });
 
   await test("unauthenticated request is 401", async () => {

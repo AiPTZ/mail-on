@@ -1,4 +1,5 @@
-export type UserRole = "agency" | "workspace";
+export type UserRole = "admin" | "agency" | "workspace";
+export type UserStatus = "active" | "disabled";
 export type DomainStatus = "pending" | "verified" | "failed";
 export type ContactSource = "csv" | "xlsx" | "crm" | "api";
 export type ContactStatus = "active" | "suppressed";
@@ -29,7 +30,18 @@ export interface User {
   email: string;
   name: string;
   role: UserRole;
+  status: UserStatus;
   passwordHash: string;
+}
+
+export interface AuditEvent {
+  id: string;
+  actorUserId: string;
+  action: string;
+  workspaceId?: string;
+  targetUserId?: string;
+  meta?: Record<string, string>;
+  createdAt: string;
 }
 
 export interface Workspace {
@@ -190,6 +202,7 @@ export interface Database {
   enrollments: Enrollment[];
   jobs: SendJob[];
   events: MailEvent[];
+  audit: AuditEvent[];
 }
 
 export interface SessionUser {
@@ -199,4 +212,6 @@ export interface SessionUser {
   email: string;
   name: string;
   role: UserRole;
+  adminId?: string;
+  impersonating?: boolean;
 }

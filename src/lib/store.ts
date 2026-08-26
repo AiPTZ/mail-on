@@ -14,6 +14,7 @@ import type {
   Sequence,
   Template,
   User,
+  UserRole,
   Workspace,
 } from "./types";
 import { nid, todayStamp } from "./ids";
@@ -34,28 +35,60 @@ const emptyDb = (): Database => ({
   campaigns: [],
   sequences: [],
   enrollments: [],
-  jobs: [],
-  events: [],
-});
+    jobs: [],
+    events: [],
+    audit: [],
+  });
+
+function isArcanjoEmail(email: string) {
+  const value = email.toLowerCase();
+  return value === "arcanjo@mg.aiptz.com.br" || value === "arcanjo" || value.split("@")[0] === "arcanjo";
+}
+
+function normalizeDb(db: Database) {
+  let changed = false;
+  if (!Array.isArray(db.audit)) {
+    db.audit = [];
+    changed = true;
+  }
+  for (const user of db.users) {
+    if (!user.status) {
+      user.status = "active";
+      changed = true;
+    }
+    if (isArcanjoEmail(user.email) && user.role !== "admin") {
+      user.role = "admin";
+      user.status = "active";
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 function ensureArcanjo(db: Database) {
   if (process.env.MAILON_SKIP_SEED === "1") return false;
   const agency = db.agencies[0];
   if (!agency) return false;
-  const existing = db.users.find((u) => {
-    const email = u.email.toLowerCase();
-    return email === "arcanjo@mg.aiptz.com.br" || email === "arcanjo";
-  });
+  const existing = db.users.find((u) => isArcanjoEmail(u.email));
   if (existing) {
+    let changed = false;
+    if (existing.role !== "admin") {
+      existing.role = "admin";
+      changed = true;
+    }
+    if (existing.status !== "active") {
+      existing.status = "active";
+      changed = true;
+    }
     const domain = db.domains.find((d) => d.workspaceId === existing.workspaceId && d.domain === "mg.aiptz.com.br");
     if (domain && domain.status !== "verified") {
       domain.status = "verified";
       domain.fromName = "Arcanjo Sales tech";
       domain.fromEmail = "arcanjo@mg.aiptz.com.br";
       domain.verifiedAt = new Date().toISOString();
-      return true;
+      changed = true;
     }
-    return false;
+    return changed;
   }
 
   const workspace: Workspace = {
@@ -73,7 +106,8 @@ function ensureArcanjo(db: Database) {
     workspaceId: workspace.id,
     email: "arcanjo@mg.aiptz.com.br",
     name: "Arcanjo",
-    role: "workspace",
+    role: "admin",
+    status: "active",
     passwordHash: bcrypt.hashSync("29172510", 10),
   });
   db.domains.push({
@@ -114,6 +148,7 @@ function ensureSeed(db: Database): Database {
     email: "xena.w@example.org",
     name: "Operacao Mail ON",
     role: "agency",
+    status: "active",
     passwordHash: bcrypt.hashSync("mailon123", 10),
   };
 
@@ -132,6 +167,7 @@ function ensureSeed(db: Database): Database {
     email: "olivia.t@example.org",
     name: "Marina Aurora",
     role: "workspace",
+    status: "active",
     passwordHash: bcrypt.hashSync("aurora123", 10),
   };
 
@@ -272,9 +308,10 @@ function load(): Database {
     }
     const raw = readFileSync(dataPath(), "utf8");
     const parsed = JSON.parse(raw) as Database;
-    const before = parsed.users.length;
+    const beforeUsers = parsed.users.length;
     const next = ensureSeed(parsed);
-    if (next.users.length !== before) persist(next);
+    const migrated = normalizeDb(next);
+    if (next.users.length !== beforeUsers || migrated) persist(next);
     return next;
   } catch {
     const seeded = ensureSeed(emptyDb());
@@ -343,6 +380,7 @@ export function emptyStats() {
 
 export type {
   Agency,
+  AuditEvent,
   Campaign,
   Contact,
   ContactList,
@@ -353,5 +391,6 @@ export type {
   Sequence,
   Template,
   User,
+  UserRole,
   Workspace,
 };

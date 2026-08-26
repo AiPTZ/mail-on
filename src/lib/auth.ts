@@ -9,6 +9,12 @@ function secret() {
   return new TextEncoder().encode(value);
 }
 
+function parseRole(value: unknown): SessionUser["role"] {
+  if (value === "admin") return "admin";
+  if (value === "agency") return "agency";
+  return "workspace";
+}
+
 export async function signUserToken(user: SessionUser) {
   return new SignJWT({ ...user })
     .setProtectedHeader({ alg: "HS256" })
@@ -26,7 +32,9 @@ export async function verifyUserToken(token: string): Promise<SessionUser | null
       workspaceId: payload.workspaceId ? String(payload.workspaceId) : undefined,
       email: String(payload.email),
       name: String(payload.name),
-      role: payload.role === "agency" ? "agency" : "workspace",
+      role: parseRole(payload.role),
+      adminId: payload.adminId ? String(payload.adminId) : undefined,
+      impersonating: payload.impersonating === true,
     };
   } catch {
     return null;
