@@ -1,0 +1,35 @@
+{
+  "name": "mail-on",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx src/lib/api-v1.test.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^7.10.0",
+    "bcryptjs": "^3.0.3",
+    "jose": "^6.2.10",
+    "lucide-react": "^1.34.0",
+    "next": "14.2.25",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "xlsx": "^0.18.5",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.25",
+    "tailwindcss": "^4",
+    "tsx": "^4.23.12",
+    "typescript": "^5"
+  }
+}
