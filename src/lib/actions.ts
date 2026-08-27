@@ -10,6 +10,7 @@ import { nid } from "./ids";
 import { provisionDomain, verifyDomainRemote } from "./mailgun";
 import { demoDns, emptyStats, findUserByEmail, readDb, writeDb } from "./store";
 import type { UserRole, UserStatus } from "./types";
+import { buildFromEmail, isValidReplyTo, sanitizeFromLocal } from "./sender";
 import { enrollList, queueCampaign, tickWorker } from "./worker";
 import { warmupCapForDay } from "./warmup";
 
@@ -151,17 +152,26 @@ export async function verifyDomainAction(workspaceId: string) {
 
 export async function updateFromAction(formData: FormData) {
   const session = await getSession();
-  if (!session || (session.role !== "admin" && !session.impersonating)) redirect("/login");
-  const workspaceId = session.workspaceId || String(formData.get("workspaceId") || "");
+  if (!session?.workspaceId) redirect("/login");
+  if (session.role !== "workspace" && session.role !== "admin" && !session.impersonating) {
+    redirect("/login");
+  }
+  const workspaceId = session.workspaceId;
   const fromName = String(formData.get("fromName") || "").trim();
-  const local = String(formData.get("fromLocal") || "ola").trim();
+  const local = sanitizeFromLocal(String(formData.get("fromLocal") || ""));
+  const replyTo = String(formData.get("replyTo") || "").trim();
+  if (!local) redirect("/app/sender?error=from");
+  if (replyTo && !isValidReplyTo(replyTo)) redirect("/app/sender?error=reply");
   writeDb((db) => {
     const domain = db.domains.find((d) => d.workspaceId === workspaceId);
     if (!domain) return;
     domain.fromName = fromName || domain.fromName;
-    domain.fromEmail = `${local}@${domain.domain}`;
+    domain.fromEmail = buildFromEmail(local, domain.domain);
+    domain.replyTo = replyTo || undefined;
   });
   revalidatePath("/app");
+  revalidatePath("/app/sender");
+  redirect("/app/sender?ok=1");
 }
 
 export async function createListAction(formData: FormData) {
@@ -257,6 +267,7 @@ export async function createCampaignAction(formData: FormData) {
   const templateId = String(formData.get("templateId") || "");
   const scheduledAt = String(formData.get("scheduledAt") || "");
   const sendNow = String(formData.get("sendNow") || "") === "1";
+  const contactIds = [...new Set(formData.getAll("contactIds").map((v) => String(v).trim()).filter(Boolean))];
   if (!name || !subject || !listId || !templateId) redirect("/app/campaigns/new?error=1");
 
   let campaignId = "";
@@ -265,6 +276,7 @@ export async function createCampaignAction(formData: FormData) {
       id: nid("cmp"),
       workspaceId: session.workspaceId!,
       listId,
+      contactIds,
       templateId,
       name,
       subject,
@@ -282,6 +294,14 @@ export async function createCampaignAction(formData: FormData) {
     await tickWorker();
   }
   redirect(`/app/campaigns/${campaignId}`);
+}
+
+export async function refreshCampaignStatsAction(campaignId: string) {
+  const session = await getSession();
+  if (!session?.workspaceId) redirect("/login");
+  const { syncCampaignEvents } = await import("./worker");
+  await syncCampaignEvents(campaignId);
+  revalidatePath(`/app/campaigns/${campaignId}`);
 }
 
 export async function sendCampaignAction(campaignId: string) {

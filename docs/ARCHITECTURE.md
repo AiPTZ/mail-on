@@ -49,7 +49,7 @@ Admin (plataforma)
                     + audit[]
 ```
 
-Isolamento: usuario so ve o `workspaceId` da sessao. Agency ve todos da `agencyId`. Admin ve tudo. API key = primeiro `admin`; precisa `X-Workspace-Id` para mutar lista/campanha.
+Isolamento: usuario so ve o `workspaceId` da sessao. Agency ve todos da `agencyId`. Admin ve tudo. API key = primeiro `admin`; precisa `X-Workspace-Id` para mutar lista/campanha. Workspace configura `fromName` / `fromLocal` / `replyTo` em `PATCH /workspaces/:id/sender`. From permanece `@` sending domain.
 
 IDs prefixados: `ag_`, `ws_`, `usr_`, `dom_`, `lst_`, `ct_`, `tpl_`, `cmp_`, `seq_`, `enr_`, `job_`, `evt_`, `aud_`.
 
@@ -139,7 +139,7 @@ EU: `https://api.eu.mailgun.net`.
 
 Sem `MAILGUN_API_KEY`: modo demo (DNS fake, `providerId` `demo_*`). Util em staging. Inutil em producao.
 
-Webhook exige HMAC SHA256 de `timestamp + token` com `MAILGUN_WEBHOOK_SIGNING_KEY`. Sem chave ou assinatura invalida / replay > 5 min → `401 invalid_signature`. Eventos tratados: `bounced`, `failed`, `complained`, `unsubscribed`.
+Webhook exige HMAC SHA256 de `timestamp + token` com `MAILGUN_WEBHOOK_SIGNING_KEY`. Sem chave ou assinatura invalida / replay > 5 min → `401 invalid_signature`. Eventos tratados: `delivered`, `opened`, `clicked`, `bounced`, `failed`, `complained`, `unsubscribed`. User-variables `jobId` e `campaignId` amarram o evento a campanha. Abertura/spam contam uma vez por contato.
 
 ## Persistencia
 

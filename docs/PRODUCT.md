@@ -18,7 +18,7 @@ Agencia queima o dominio do cliente (ou o proprio) mandando marketing de SMTP co
 |---|---|---|---|
 | Admin | painel `/admin` | CRUD de usuarios, criar workspace + sending domain, listar SPF/DKIM/DMARC/CNAME/MX, verificar DNS, impersonar, processar fila, ler jobs/erros/audit | apagar historico; desativar o ultimo admin |
 | Agency | painel `/agency` | ver workspaces e saude da propria agencia | criar dominio, criar/editar acesso, ver logs globais |
-| Workspace | painel `/app` | listas, templates Unlayer, campanhas, sequencias | ver DNS, editar From/dominio, criar usuario |
+| Workspace | painel `/app` | listas, templates Unlayer, campanhas, sequencias, From local e Reply-To | ver DNS, mudar o host do dominio, criar usuario |
 
 O modelo ja e multi-agencia. So o admin configura dominio e acesso. O cliente so usa o `/app`.
 
@@ -29,7 +29,8 @@ O modelo ja e multi-agencia. So o admin configura dominio e acesso. O cliente so
 - 1 sending domain por workspace (1:1).
 - Mailgun provisiona SPF, DKIM, tracking; DMARC entra no DNS de exemplo.
 - Status: `pending` → `verified` | `failed`.
-- From travado em `{local}@{sendingDomain}`. Nunca outro host.
+- From travado em `{local}@{sendingDomain}`. Workspace escolhe o local (`ola`, `vendas`) e o nome. Nunca outro host.
+- Reply-To livre: respostas podem ir para qualquer caixa (`contato@empresa.com`).
 - Sem `verified`, campanha vai para `blocked`. Zero envio.
 
 Cinco subdominios **nao** viram cinco tetos. Gmail/Microsoft olham o sub **e** o dominio organizacional. Subs extras so isolam fluxo (transacional vs marketing); cada um aquece do dia 1.
@@ -51,10 +52,11 @@ Cinco subdominios **nao** viram cinco tetos. Gmail/Microsoft olham o sub **e** o
 
 ### Campanha (one-shot)
 
-- Lista + template + assunto + preview.
+- Lista + selecao de contatos (checkbox; padrao todos os ativos) + template + assunto + preview.
 - Agora ou `scheduledAt`.
 - Snapshot do HTML no job (editar o template depois nao muda o que ja foi enfileirado).
-- So contatos `active` da lista.
+- So contatos `active` selecionados entram na fila.
+- Relatorio por campanha: enviados, abertos, spam, respondidos, bounce, clique. Botao **Baixar relatorio atual** gera Excel (abas Resumo e Contatos). Botao atualiza via Mailgun Events.
 
 ### Sequencia
 
@@ -92,7 +94,7 @@ Todo disparo leva:
 
 Stats por campanha: queued, sent, delivered, opened, clicked, bounced, complained, unsubscribed.
 
-Open/click dependem de webhook Mailgun configurado. Bounce/complaint/unsub ja entram pelo webhook ou pelo link de descadastro.
+Open/click/spam entram pelo webhook Mailgun (HMAC, tracking ligado no envio). Bounce/complaint/unsub tambem suprimem o contato. Export: `GET /api/v1/campaigns/:id/report?format=csv`.
 
 ## Fora do v1
 

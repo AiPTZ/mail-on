@@ -78,6 +78,7 @@ export default async function AdminWorkspacePage({ params }: { params: { id: str
             <p className="label">Remetente</p>
             <p className="mt-2 font-serif text-xl">{domain?.fromName}</p>
             <p className="mt-1 font-mono text-xs text-cream/70">{domain?.fromEmail}</p>
+            <p className="mt-2 text-xs text-cream/40">Reply-To: {domain?.replyTo || "mesmo From"}</p>
           </div>
           <div className="panel p-5">
             <p className="label">Acesso do cliente</p>

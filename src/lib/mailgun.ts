@@ -12,6 +12,7 @@ async function mailgun(path: string, init?: RequestInit) {
   const auth = Buffer.from(`api:${API_KEY}`).toString("base64");
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
+    signal: init?.signal || AbortSignal.timeout(8000),
     headers: {
       Authorization: `Basic ${auth}`,
       ...(init?.headers || {}),
@@ -69,6 +70,9 @@ export async function sendMessage(input: {
   subject: string;
   html: string;
   unsubscribeUrl: string;
+  replyTo?: string;
+  jobId?: string;
+  campaignId?: string;
 }): Promise<string> {
   if (!mailgunConfigured()) {
     return `demo_${Date.now()}`;
@@ -81,7 +85,13 @@ export async function sendMessage(input: {
     html: input.html,
     "h:List-Unsubscribe": `<${input.unsubscribeUrl}>`,
     "h:List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    "o:tracking": "yes",
+    "o:tracking-opens": "yes",
+    "o:tracking-clicks": "htmlonly",
   });
+  if (input.replyTo) body.set("h:Reply-To", input.replyTo);
+  if (input.jobId) body.set("v:jobId", input.jobId);
+  if (input.campaignId) body.set("v:campaignId", input.campaignId);
 
   const result = await mailgun(`/v3/${input.domain}/messages`, {
     method: "POST",
@@ -89,4 +99,43 @@ export async function sendMessage(input: {
     body,
   });
   return result.id || `mg_${Date.now()}`;
+}
+
+export type MailgunStoredEvent = {
+  event: string;
+  recipient: string;
+  sender?: string;
+  jobId?: string;
+  campaignId?: string;
+  severity?: string;
+  reason?: string;
+  description?: string;
+};
+
+export async function fetchDomainEvents(domain: string, begin: Date): Promise<MailgunStoredEvent[]> {
+  if (!mailgunConfigured()) return [];
+  const params = new URLSearchParams({
+    begin: String(Math.floor(begin.getTime() / 1000)),
+    ascending: "yes",
+    limit: "300",
+  });
+  const payload = await mailgun(`/v3/${domain}/events?${params.toString()}`);
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  return items.map((item: Record<string, unknown>) => {
+    const userVars = (item["user-variables"] || {}) as Record<string, unknown>;
+    const envelope = (item.envelope || {}) as Record<string, unknown>;
+    const message = (item.message || {}) as Record<string, unknown>;
+    const headers = (message.headers || {}) as Record<string, unknown>;
+    const delivery = (item["delivery-status"] || {}) as Record<string, unknown>;
+    return {
+      event: String(item.event || ""),
+      recipient: String(item.recipient || headers.to || ""),
+      sender: envelope.sender ? String(envelope.sender) : undefined,
+      jobId: userVars.jobId ? String(userVars.jobId) : undefined,
+      campaignId: userVars.campaignId ? String(userVars.campaignId) : undefined,
+      severity: item.severity ? String(item.severity) : undefined,
+      reason: item.reason ? String(item.reason) : undefined,
+      description: String(delivery.message || delivery.description || item["error"] || ""),
+    };
+  });
 }

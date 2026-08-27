@@ -1,8 +1,8 @@
 import { emptyStats, readDb, writeDb, workspaceDomain } from "./store";
-import { sendMessage } from "./mailgun";
+import { fetchDomainEvents, sendMessage } from "./mailgun";
 import { canRaiseWarmup, warmupCapForDay } from "./warmup";
 import { nid, todayStamp } from "./ids";
-import type { Campaign, Contact, SendingDomain, SendJob } from "./types";
+import type { Campaign, Contact, EventType, SendingDomain, SendJob } from "./types";
 
 function resetDailyCounters(domain: SendingDomain) {
   const today = todayStamp();
@@ -42,8 +42,17 @@ export function queueCampaign(campaignId: string) {
     const template = db.templates.find((t) => t.id === campaign.templateId);
     if (!template) throw new Error("Template nao encontrado");
 
+    const alreadyQueued = db.jobs.some((j) => j.campaignId === campaign.id);
+    if (alreadyQueued) {
+      if (campaign.status === "draft" || campaign.status === "blocked") campaign.status = "sending";
+      return;
+    }
+    const selected = campaign.contactIds ? new Set(campaign.contactIds) : null;
     const contacts = db.contacts.filter(
-      (c) => c.listId === campaign.listId && c.status === "active",
+      (c) =>
+        c.listId === campaign.listId &&
+        c.status === "active" &&
+        (!selected || selected.has(c.id)),
     );
     const now = new Date().toISOString();
     for (const contact of contacts) {
@@ -174,6 +183,9 @@ async function dispatchJob(job: SendJob, domain: SendingDomain, contact: Contact
     subject: job.subject,
     html,
     unsubscribeUrl: unsub,
+    replyTo: domain.replyTo,
+    jobId: job.id,
+    campaignId: job.campaignId,
   });
 
   writeDb((db) => {
@@ -254,7 +266,17 @@ export async function tickWorker() {
     }
     resetDailyCounters(domain);
     const used = sentByWorkspace[job.workspaceId] || 0;
-    if (used >= remainingCap(domain)) continue;
+    if (used >= remainingCap(domain)) {
+      if (job.campaignId) {
+        writeDb((d) => {
+          const campaign = d.campaigns.find((c) => c.id === job.campaignId);
+          if (campaign && campaign.status === "sending") {
+            campaign.blockedReason = `Teto diario ${domain.sentToday}/${domain.dailyCap}. O restante sai no proximo ciclo de warmup.`;
+          }
+        });
+      }
+      continue;
+    }
 
     const contact = db.contacts.find((c) => c.id === job.contactId);
     if (!contact) {
@@ -306,28 +328,301 @@ export function suppressContact(
   workspaceId: string,
   email: string,
   reason: "bounce" | "complaint" | "unsubscribe",
+  opts?: { recordEvent?: boolean },
 ) {
   writeDb((db) => {
-    const contact = db.contacts.find(
-      (c) => c.workspaceId === workspaceId && c.email.toLowerCase() === email.toLowerCase(),
-    );
-    if (!contact) return;
-    contact.status = "suppressed";
-    contact.suppressReason = reason;
+    applySuppress(db, workspaceId, email, reason, opts?.recordEvent !== false);
+  });
+}
+
+function applySuppress(
+  db: ReturnType<typeof readDb>,
+  workspaceId: string,
+  email: string,
+  reason: "bounce" | "complaint" | "unsubscribe",
+  recordEvent: boolean,
+) {
+  const contact = db.contacts.find(
+    (c) => c.workspaceId === workspaceId && c.email.toLowerCase() === email.toLowerCase(),
+  );
+  if (!contact) return contact;
+  contact.status = "suppressed";
+  contact.suppressReason = reason;
+  if (recordEvent) {
     db.events.push({
       id: nid("evt"),
       workspaceId,
       contactId: contact.id,
       type: reason === "bounce" ? "bounced" : reason === "complaint" ? "complained" : "unsubscribed",
       createdAt: new Date().toISOString(),
+      meta: { email: contact.email.toLowerCase() },
     });
-    const domain = db.domains.find((d) => d.workspaceId === workspaceId);
-    if (domain) {
-      const total = Math.max(1, domain.sentToday + 20);
-      if (reason === "bounce") domain.bounceRate = Math.min(1, domain.bounceRate + 1 / total);
-      if (reason === "complaint") domain.complaintRate = Math.min(1, domain.complaintRate + 1 / total);
+  }
+  const domain = db.domains.find((d) => d.workspaceId === workspaceId);
+  if (domain) {
+    const total = Math.max(1, domain.sentToday + 20);
+    if (reason === "bounce") domain.bounceRate = Math.min(1, domain.bounceRate + 1 / total);
+    if (reason === "complaint") domain.complaintRate = Math.min(1, domain.complaintRate + 1 / total);
+  }
+  return contact;
+}
+
+const EVENT_MAP: Record<string, EventType> = {
+  delivered: "delivered",
+  opened: "opened",
+  clicked: "clicked",
+  bounced: "bounced",
+  rejected: "bounced",
+  complained: "complained",
+  unsubscribed: "unsubscribed",
+  replied: "replied",
+  stored: "replied",
+  inbound: "replied",
+};
+
+export function extractEmail(raw: string): string {
+  const trimmed = (raw || "").trim();
+  const angle = trimmed.match(/<([^>]+)>/);
+  return (angle ? angle[1] : trimmed).trim().toLowerCase();
+}
+
+export function classifyMailgunEvent(event: string, severity?: string): EventType | undefined {
+  if (event === "failed") {
+    if ((severity || "").toLowerCase() === "temporary") return undefined;
+    return "bounced";
+  }
+  return EVENT_MAP[event];
+}
+
+function bounceNote(reason?: string, description?: string) {
+  return [reason, description].map((part) => (part || "").trim()).filter(Boolean).join(" — ");
+}
+
+export function ingestMailgunEvent(input: {
+  event: string;
+  recipient: string;
+  workspaceId: string;
+  jobId?: string;
+  campaignId?: string;
+  sender?: string;
+  severity?: string;
+  reason?: string;
+  description?: string;
+}) {
+  const type = classifyMailgunEvent(input.event, input.severity);
+  if (!type) return;
+  const inbound = type === "replied" && Boolean(input.sender);
+  const email = extractEmail(inbound ? input.sender || input.recipient : input.recipient);
+  if (!email) return;
+
+  writeDb((db) => {
+    const domain = db.domains.find((d) => d.workspaceId === input.workspaceId);
+    if (
+      inbound &&
+      domain &&
+      (email === domain.fromEmail.toLowerCase() || email.endsWith(`@${domain.domain.toLowerCase()}`))
+    ) {
+      return;
+    }
+
+    const contact = db.contacts.find(
+      (c) => c.workspaceId === input.workspaceId && c.email.toLowerCase() === email,
+    );
+    let job = input.jobId ? db.jobs.find((j) => j.id === input.jobId) : undefined;
+    if (!job) {
+      job = db.jobs
+        .filter(
+          (j) =>
+            j.workspaceId === input.workspaceId &&
+            j.to.toLowerCase() === email &&
+            (!input.campaignId || j.campaignId === input.campaignId),
+        )
+        .sort((a, b) => (b.sentAt || b.scheduledAt).localeCompare(a.sentAt || a.scheduledAt))[0];
+    }
+
+    let campaignId = input.campaignId || job?.campaignId;
+    if (campaignId) {
+      const inCampaign = db.jobs.some(
+        (j) => j.campaignId === campaignId && j.to.toLowerCase() === email,
+      );
+      if (!inCampaign) campaignId = job?.campaignId;
+      if (campaignId && !db.jobs.some((j) => j.campaignId === campaignId && j.to.toLowerCase() === email)) {
+        campaignId = undefined;
+      }
+    }
+
+    const uniqueKey = `${type}:${campaignId || ""}:${email}`;
+    const already = db.events.some((e) => e.meta?.uniqueKey === uniqueKey);
+    if (already) return;
+
+    const note = bounceNote(input.reason, input.description);
+    db.events.push({
+      id: nid("evt"),
+      workspaceId: input.workspaceId,
+      contactId: contact?.id,
+      jobId: job?.id,
+      type,
+      createdAt: new Date().toISOString(),
+      meta: {
+        email,
+        uniqueKey,
+        ...(campaignId ? { campaignId } : {}),
+        ...(input.severity ? { severity: input.severity } : {}),
+        ...(note ? { bounceReason: note } : {}),
+      },
+    });
+
+    const campaign = campaignId ? db.campaigns.find((c) => c.id === campaignId) : undefined;
+    if (campaign) {
+      if (type === "opened") campaign.stats.opened += 1;
+      if (type === "clicked") campaign.stats.clicked += 1;
+      if (type === "bounced") campaign.stats.bounced += 1;
+      if (type === "complained") campaign.stats.complained += 1;
+      if (type === "unsubscribed") campaign.stats.unsubscribed += 1;
+      if (type === "replied") campaign.stats.replied = (campaign.stats.replied || 0) + 1;
+    }
+
+    if (type === "bounced" && job) {
+      job.status = "failed";
+      job.skipReason = note || "bounce permanente";
+    }
+
+    if (type === "bounced" || type === "complained" || type === "unsubscribed") {
+      applySuppress(
+        db,
+        input.workspaceId,
+        email,
+        type === "complained" ? "complaint" : type === "bounced" ? "bounce" : "unsubscribe",
+        false,
+      );
     }
   });
+}
+
+export type CampaignReportRow = {
+  email: string;
+  name: string;
+  sent: boolean;
+  delivered: boolean;
+  opened: boolean;
+  clicked: boolean;
+  bounced: boolean;
+  bounceReason: string;
+  complained: boolean;
+  unsubscribed: boolean;
+  replied: boolean;
+};
+
+function csvEscape(value: string) {
+  if (/[",\n]/.test(value)) return `"${value.replaceAll('"', '""')}"`;
+  return value;
+}
+
+export async function syncCampaignEvents(campaignId: string) {
+  const db = readDb();
+  const campaign = db.campaigns.find((c) => c.id === campaignId);
+  if (!campaign) return;
+  const domain = db.domains.find((d) => d.workspaceId === campaign.workspaceId);
+  if (!domain) return;
+  const begin = new Date(Date.now() - 14 * 86400000);
+  try {
+    const events = await fetchDomainEvents(domain.domain, begin);
+    const jobs = db.jobs.filter((j) => j.campaignId === campaign.id);
+    for (const item of events) {
+      const email = extractEmail(item.recipient);
+      const senderEmail = extractEmail(item.sender || "");
+      const belongs =
+        item.campaignId === campaign.id ||
+        Boolean(item.jobId && jobs.some((j) => j.id === item.jobId)) ||
+        (!item.campaignId &&
+          jobs.some((j) => j.to.toLowerCase() === email || (senderEmail && j.to.toLowerCase() === senderEmail)));
+      if (!belongs) continue;
+      ingestMailgunEvent({
+        event: item.event,
+        recipient: item.recipient,
+        sender: item.sender,
+        workspaceId: campaign.workspaceId,
+        jobId: item.jobId,
+        campaignId: campaign.id,
+        severity: item.severity,
+        reason: item.reason,
+        description: item.description,
+      });
+    }
+    const report = buildCampaignReport(campaign.id);
+    if (report) {
+      writeDb((d) => {
+        const row = d.campaigns.find((c) => c.id === campaign.id);
+        if (row) row.stats = report.stats;
+      });
+    }
+  } catch {
+    return;
+  }
+}
+
+export function buildCampaignReport(campaignId: string) {
+  const db = readDb();
+  const campaign = db.campaigns.find((c) => c.id === campaignId);
+  if (!campaign) return null;
+  const jobs = db.jobs.filter((j) => j.campaignId === campaignId);
+  const events = db.events.filter(
+    (e) => e.meta?.campaignId === campaignId || jobs.some((j) => j.id === e.jobId),
+  );
+  const rows: CampaignReportRow[] = jobs.map((job) => {
+    const contact = db.contacts.find((c) => c.id === job.contactId);
+    const related = events.filter(
+      (e) =>
+        e.jobId === job.id ||
+        (e.meta?.campaignId === campaignId &&
+          (e.contactId === job.contactId || e.meta?.email === job.to.toLowerCase())),
+    );
+    const bounce = related.find((e) => e.type === "bounced");
+    return {
+      email: job.to,
+      name: contact?.name || "",
+      sent: job.status === "sent" || job.status === "failed",
+      delivered: related.some((e) => e.type === "delivered") && !bounce,
+      opened: related.some((e) => e.type === "opened"),
+      clicked: related.some((e) => e.type === "clicked"),
+      bounced: Boolean(bounce),
+      bounceReason: bounce?.meta?.bounceReason || job.skipReason || "",
+      complained: related.some((e) => e.type === "complained"),
+      unsubscribed: related.some((e) => e.type === "unsubscribed"),
+      replied: related.some((e) => e.type === "replied"),
+    };
+  });
+  const header = "email,name,sent,delivered,opened,clicked,bounced,bounce_reason,complained,unsubscribed,replied";
+  const csv = [
+    header,
+    ...rows.map((r) =>
+      [
+        csvEscape(r.email),
+        csvEscape(r.name),
+        r.sent ? "1" : "0",
+        r.delivered ? "1" : "0",
+        r.opened ? "1" : "0",
+        r.clicked ? "1" : "0",
+        r.bounced ? "1" : "0",
+        csvEscape(r.bounceReason),
+        r.complained ? "1" : "0",
+        r.unsubscribed ? "1" : "0",
+        r.replied ? "1" : "0",
+      ].join(","),
+    ),
+  ].join("\n");
+  const stats = {
+    queued: jobs.filter((j) => j.status === "queued").length,
+    sent: rows.filter((r) => r.sent).length,
+    delivered: rows.filter((r) => r.delivered).length,
+    opened: rows.filter((r) => r.opened).length,
+    clicked: rows.filter((r) => r.clicked).length,
+    bounced: rows.filter((r) => r.bounced).length,
+    complained: rows.filter((r) => r.complained).length,
+    unsubscribed: rows.filter((r) => r.unsubscribed).length,
+    replied: rows.filter((r) => r.replied).length,
+  };
+  return { campaign, stats, rows, csv };
 }
 
 export { emptyStats };

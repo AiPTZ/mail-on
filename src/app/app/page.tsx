@@ -26,7 +26,7 @@ export default async function WorkspaceHome() {
         <Stat
           label="Dominio"
           value={domain?.status === "verified" ? "Pronto" : "Bloqueado"}
-          hint={domain?.domain}
+          hint={`${domain?.fromEmail || domain?.domain}${domain?.replyTo ? ` · resp. ${domain.replyTo}` : ""}`}
         />
         <Stat label="Contatos ativos" value={active} hint={`${contacts.length} no total`} />
         <Stat label="Enviados" value={sent} hint={`teto hoje ${domain?.sentToday}/${domain?.dailyCap}`} />

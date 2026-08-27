@@ -1,4 +1,5 @@
 import { createCampaignAction } from "@/lib/actions";
+import { ContactPicker } from "@/components/contact-picker";
 import { Button, Field, Input, PageHeader, Select } from "@/components/ui";
 import { getSession } from "@/lib/auth";
 import { readDb } from "@/lib/store";
@@ -8,13 +9,22 @@ export default async function NewCampaignPage() {
   const db = readDb();
   const lists = db.lists.filter((l) => l.workspaceId === session!.workspaceId);
   const templates = db.templates.filter((t) => t.workspaceId === session!.workspaceId);
+  const contacts = db.contacts
+    .filter((c) => c.workspaceId === session!.workspaceId)
+    .map((c) => ({
+      id: c.id,
+      listId: c.listId,
+      email: c.email,
+      name: c.name,
+      status: c.status,
+    }));
 
   return (
     <div className="max-w-xl">
       <PageHeader
         kicker="Campanha"
         title="Novo disparo"
-        subtitle="So sai se o dominio estiver verificado. Contatos suprimidos sao ignorados."
+        subtitle="Escolha quem recebe. Contatos suprimidos nao entram. So sai se o dominio estiver verificado."
       />
       <form action={createCampaignAction} className="panel space-y-5 p-6">
         <Field label="Nome interno">
@@ -26,15 +36,7 @@ export default async function NewCampaignPage() {
         <Field label="Pre-header">
           <Input name="previewText" placeholder="Pecas sob medida" />
         </Field>
-        <Field label="Lista">
-          <Select name="listId" required>
-            {lists.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.name}
-              </option>
-            ))}
-          </Select>
-        </Field>
+        <ContactPicker lists={lists} contacts={contacts} />
         <Field label="Template">
           <Select name="templateId" required>
             {templates.map((t) => (

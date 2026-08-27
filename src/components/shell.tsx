@@ -31,6 +31,7 @@ const ICONS: Record<string, LucideIcon> = {
   "/agency": Building2,
   "/agency/new": Plus,
   "/app": LayoutDashboard,
+  "/app/sender": Mail,
   "/app/audience": Users,
   "/app/templates": Mail,
   "/app/campaigns": List,

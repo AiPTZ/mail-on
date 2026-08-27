@@ -63,6 +63,12 @@ function normalizeDb(db: Database) {
       changed = true;
     }
   }
+  for (const campaign of db.campaigns) {
+    if (typeof campaign.stats.replied !== "number") {
+      campaign.stats.replied = 0;
+      changed = true;
+    }
+  }
   return changed;
 }
 
@@ -376,6 +382,7 @@ export function emptyStats() {
     bounced: 0,
     complained: 0,
     unsubscribed: 0,
+    replied: 0,
   };
 }
 

@@ -6,7 +6,8 @@ import { provisionDomain, verifyDomainRemote } from "./mailgun";
 import { checkLoginRate } from "./rate-limit";
 import { demoDns, emptyStats, findUserByEmail, readDb, writeDb } from "./store";
 import type { SessionUser, UserRole, UserStatus } from "./types";
-import { enrollList, queueCampaign, tickWorker } from "./worker";
+import { buildFromEmail, isValidReplyTo, sanitizeFromLocal } from "./sender";
+import { buildCampaignReport, enrollList, queueCampaign, syncCampaignEvents, tickWorker } from "./worker";
 import { warmupCapForDay } from "./warmup";
 
 export type ApiResult<T = Record<string, unknown>> = {
@@ -203,6 +204,39 @@ async function verifyWorkspaceDomain(session: SessionUser, workspaceId: string) 
   return ok({ domain: readDb().domains.find((d) => d.id === domain.id) });
 }
 
+function updateSender(session: SessionUser, workspaceId: string, body: Record<string, unknown>) {
+  if (!canAccessWorkspace(session, workspaceId)) return fail(404, "not_found");
+  if (session.role !== "workspace" && session.role !== "admin" && !session.impersonating) {
+    return fail(403, "workspace_required");
+  }
+  const domain = readDb().domains.find((d) => d.workspaceId === workspaceId);
+  if (!domain) return fail(404, "domain_not_found");
+
+  const fromName = body.fromName !== undefined ? String(body.fromName || "").trim() : undefined;
+  const fromLocalRaw = body.fromLocal !== undefined ? String(body.fromLocal || "") : undefined;
+  const replyRaw = body.replyTo !== undefined ? String(body.replyTo || "").trim() : undefined;
+
+  if (fromLocalRaw !== undefined) {
+    const local = sanitizeFromLocal(fromLocalRaw);
+    if (!local) return fail(400, "from_locked_to_domain");
+  }
+  if (replyRaw !== undefined && replyRaw !== "" && !isValidReplyTo(replyRaw)) {
+    return fail(400, "invalid_reply_to");
+  }
+
+  writeDb((db) => {
+    const row = db.domains.find((d) => d.id === domain.id);
+    if (!row) return;
+    if (fromName) row.fromName = fromName;
+    if (fromLocalRaw !== undefined) {
+      const local = sanitizeFromLocal(fromLocalRaw);
+      if (local) row.fromEmail = buildFromEmail(local, row.domain);
+    }
+    if (replyRaw !== undefined) row.replyTo = replyRaw || undefined;
+  });
+  return ok({ domain: readDb().domains.find((d) => d.id === domain.id) });
+}
+
 function workspaceHealth(session: SessionUser, workspaceId: string) {
   if (!canAccessWorkspace(session, workspaceId)) return fail(404, "not_found");
   const db = readDb();
@@ -214,6 +248,7 @@ function workspaceHealth(session: SessionUser, workspaceId: string) {
       workspaceId,
       domain: domain.domain,
       fromEmail: domain.fromEmail,
+      replyTo: domain.replyTo || "",
       status: domain.status,
       dailyCap: domain.dailyCap,
       sentToday: domain.sentToday,
@@ -342,12 +377,16 @@ async function createCampaign(session: SessionUser, body: Record<string, unknown
   if (!db.templates.find((t) => t.id === templateId && t.workspaceId === ws.workspaceId)) {
     return fail(404, "template_not_found");
   }
+  const contactIds = Array.isArray(body.contactIds)
+    ? [...new Set(body.contactIds.map((id) => String(id)).filter(Boolean))]
+    : undefined;
   let campaignId = "";
   writeDb((store) => {
     const campaign = {
       id: nid("cmp"),
       workspaceId: ws.workspaceId,
       listId,
+      contactIds,
       templateId,
       name,
       subject,
@@ -618,6 +657,9 @@ export async function handle(
     if (verb === "POST" && parts[2] === "verify-domain" && !parts[3]) {
       return verifyWorkspaceDomain(session, workspaceId);
     }
+    if ((verb === "PATCH" || verb === "PUT") && parts[2] === "sender" && !parts[3]) {
+      return updateSender(session, workspaceId, payload);
+    }
     if (verb === "GET" && !parts[2]) {
       if (!canAccessWorkspace(session, workspaceId)) return fail(404, "not_found");
       const db = readDb();
@@ -687,7 +729,21 @@ export async function handle(
     if ("status" in ws) return ws;
     const campaign = readDb().campaigns.find((c) => c.id === parts[1] && c.workspaceId === ws.workspaceId);
     if (!campaign) return fail(404, "not_found");
-    if (verb === "GET" && !parts[2]) return ok({ campaign });
+    if (verb === "GET" && !parts[2]) {
+      await syncCampaignEvents(campaign.id);
+      return ok({ campaign: readDb().campaigns.find((c) => c.id === campaign.id) });
+    }
+    if (verb === "GET" && parts[2] === "report") {
+      await syncCampaignEvents(campaign.id);
+      const report = buildCampaignReport(campaign.id);
+      if (!report) return fail(404, "not_found");
+      return ok({ campaign: report.campaign, stats: report.stats, rows: report.rows, csv: report.csv });
+    }
+    if (verb === "POST" && parts[2] === "refresh") {
+      await syncCampaignEvents(campaign.id);
+      const report = buildCampaignReport(campaign.id);
+      return ok({ campaign: report?.campaign, stats: report?.stats, rows: report?.rows });
+    }
     if (verb === "POST" && parts[2] === "send") return sendCampaign(session, parts[1], workspaceHint);
   }
 

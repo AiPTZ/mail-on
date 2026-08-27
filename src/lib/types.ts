@@ -15,7 +15,8 @@ export type EventType =
   | "clicked"
   | "bounced"
   | "complained"
-  | "unsubscribed";
+  | "unsubscribed"
+  | "replied";
 
 export interface Agency {
   id: string;
@@ -65,6 +66,7 @@ export interface SendingDomain {
   domain: string;
   fromName: string;
   fromEmail: string;
+  replyTo?: string;
   status: DomainStatus;
   dnsRecords: DnsRecord[];
   dailyCap: number;
@@ -115,12 +117,14 @@ export interface SendStats {
   bounced: number;
   complained: number;
   unsubscribed: number;
+  replied: number;
 }
 
 export interface Campaign {
   id: string;
   workspaceId: string;
   listId: string;
+  contactIds?: string[];
   templateId: string;
   name: string;
   subject: string;

@@ -74,6 +74,9 @@ Sem exclusao fisica. Ultimo admin nao desativa.
 | GET | `/api/v1/workspaces/:id` | dono | `{ workspace, domain }` |
 | GET | `/api/v1/workspaces/:id/health` | dono | cap, bounce, complaint, remainingToday |
 | POST | `/api/v1/workspaces/:id/verify-domain` | admin | chama Mailgun verify; `verified` ou `failed` |
+| PATCH | `/api/v1/workspaces/:id/sender` | workspace (ou admin) | `{ fromName?, fromLocal?, replyTo? }` |
+
+`fromLocal` e so a parte antes do `@`. From sempre `{fromLocal}@{sendingDomain}`. `from_locked_to_domain` se vier host. `replyTo` aceita qualquer email valido (caixa de resposta). Vazio remove o Reply-To.
 
 `domain` nasce `pending`. From fica travado em `{fromLocal}@{domain}`. Nada dispara ate `verified`.
 
@@ -106,11 +109,14 @@ HTML e o payload enviado. Unlayer e so o editor da UI.
 | Metodo | Rota | Body |
 |---|---|---|
 | GET | `/api/v1/campaigns` | |
-| POST | `/api/v1/campaigns` | `{ name, subject, listId, templateId, previewText?, scheduledAt?, sendNow? }` |
+| POST | `/api/v1/campaigns` | `{ name, subject, listId, templateId, previewText?, scheduledAt?, sendNow?, contactIds? }` |
 | GET | `/api/v1/campaigns/:id` | |
+| GET | `/api/v1/campaigns/:id/report` | `{ campaign, stats, rows, csv }`. `?format=xlsx` planilha Excel (Resumo + Contatos). `?format=csv` arquivo texto |
 | POST | `/api/v1/campaigns/:id/send` | enfileira + tick |
 
-Se o dominio nao esta `verified`, a campanha vai para `blocked`. So contatos `active` da lista entram na fila.
+`contactIds` opcional: recorte da lista. Sem o campo, todos os `active`. Com array, so esses ids (ainda precisam estar `active` na lista). Dominio `pending`/`failed` = campanha `blocked`.
+
+Stats: sent, delivered, opened, clicked, bounced, complained, unsubscribed, replied. Open/click/spam entram pelo webhook Mailgun (HMAC) ou `POST /campaigns/:id/refresh` (Events API). Resposta conta quando o inbound (`stored`) chega no sending domain. Abertura e resposta sao unicas por contato.
 
 ## Sequencias
 

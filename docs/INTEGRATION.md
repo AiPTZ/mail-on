@@ -95,6 +95,7 @@ X-Workspace-Id: ws_xxx
   "subject": "Novidade",
   "listId": "lst_xxx",
   "templateId": "tpl_xxx",
+  "contactIds": ["ct_xxx"],
   "sendNow": true
 }
 ```
@@ -106,8 +107,11 @@ Se `domain.status !== verified`, a campanha volta `blocked`.
 | Evento | Origem | Acao |
 |---|---|---|
 | bounce / failed | webhook Mailgun | parar cadencia naquele email |
-| complained | webhook Mailgun | never email |
+| complained | webhook Mailgun | never email; stats.complained |
+| opened / clicked | webhook Mailgun (tracking) ou Events API | stats por campanha, unico por contato |
+| replied / stored | inbound Mailgun no sending domain | stats.replied, unico por contato |
 | unsubscribed | webhook ou `/api/public/unsubscribe` | opt-out |
+| relatorio CSV | `GET /campaigns/:id/report?format=csv` | enviados / abertos / spam |
 | campaign.blocked | resposta da API | pedir DNS |
 | remainingToday = 0 | `/workspaces/:id/health` | adiar blast |
 

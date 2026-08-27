@@ -6,6 +6,7 @@ export const dynamic = "force-dynamic";
 
 const items = [
   { href: "/app", label: "Visao geral" },
+  { href: "/app/sender", label: "Remetente" },
   { href: "/app/audience", label: "Listas" },
   { href: "/app/templates", label: "Templates" },
   { href: "/app/campaigns", label: "Campanhas" },

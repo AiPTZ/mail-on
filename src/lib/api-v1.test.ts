@@ -326,6 +326,308 @@ async function run() {
     assert(verifyMailgunSignature({ timestamp: ts, token: "tok", signature, key: "secret", now }) === true, "valid");
   });
 
+  async function seedReadyWorkspace() {
+    const { data } = await api.login({ email: "arcanjo", password: "29172510" });
+    const ws = await api.handle(
+      "POST",
+      "/workspaces",
+      { name: "A", email: "a@a.com", password: "pw", domain: "mail.a.com" },
+      data!.token,
+    );
+    const workspaceId = (ws.data as { workspace: { id: string } }).workspace.id;
+    const { writeDb } = await import("./store");
+    writeDb((db) => {
+      const domain = db.domains.find((d) => d.workspaceId === workspaceId);
+      if (domain) {
+        domain.status = "verified";
+        domain.verifiedAt = new Date().toISOString();
+      }
+    });
+    const token = (await api.login({ email: "a@a.com", password: "pw" })).data!.token;
+    const list = await api.handle("POST", "/lists", { name: "VIP" }, token);
+    const listId = (list.data as { list: { id: string } }).list.id;
+    await api.handle(
+      "POST",
+      `/lists/${listId}/contacts`,
+      {
+        contacts: [
+          { email: "ana@x.com", name: "Ana" },
+          { email: "bob@x.com", name: "Bob" },
+          { email: "cara@x.com", name: "Cara" },
+        ],
+      },
+      token,
+    );
+    const tpl = await api.handle("POST", "/templates", { name: "T", html: "<p>oi</p>" }, token);
+    const contacts = ((await api.handle("GET", "/contacts", {}, token)).data as { contacts: { id: string; email: string }[] })
+      .contacts;
+    return {
+      token,
+      workspaceId,
+      listId,
+      templateId: (tpl.data as { template: { id: string } }).template.id,
+      contacts,
+    };
+  }
+
+  await test("campaign with contactIds queues only selected contacts", async () => {
+    const seeded = await seedReadyWorkspace();
+    const ana = seeded.contacts.find((c) => c.email === "ana@x.com");
+    assert(ana, "ana");
+    const camp = await api.handle(
+      "POST",
+      "/campaigns",
+      {
+        name: "Recorte",
+        subject: "Oi",
+        listId: seeded.listId,
+        templateId: seeded.templateId,
+        contactIds: [ana.id],
+        sendNow: true,
+      },
+      seeded.token,
+    );
+    assert(camp.ok, camp.error);
+    const campaign = (camp.data as { campaign: { id: string; contactIds?: string[]; stats: { queued: number } } }).campaign;
+    assert(campaign.contactIds?.length === 1 && campaign.contactIds[0] === ana.id, "persists selection");
+    const { readDb } = await import("./store");
+    const jobs = readDb().jobs.filter((j) => j.campaignId === campaign.id);
+    assert(jobs.length === 1 && jobs[0].to === "ana@x.com", `expected 1 job to ana got ${jobs.length}`);
+    assert(campaign.stats.queued === 1, "queued selected only");
+  });
+
+  await test("mailgun opened and complained update campaign stats once", async () => {
+    const seeded = await seedReadyWorkspace();
+    const camp = await api.handle(
+      "POST",
+      "/campaigns",
+      {
+        name: "Blast",
+        subject: "Oi",
+        listId: seeded.listId,
+        templateId: seeded.templateId,
+        sendNow: true,
+      },
+      seeded.token,
+    );
+    assert(camp.ok, camp.error);
+    const campaignId = (camp.data as { campaign: { id: string } }).campaign.id;
+    const { readDb } = await import("./store");
+    const job = readDb().jobs.find((j) => j.campaignId === campaignId && j.to === "ana@x.com");
+    assert(job, "job");
+    const { ingestMailgunEvent } = await import("./worker");
+    ingestMailgunEvent({
+      event: "opened",
+      recipient: "ana@x.com",
+      workspaceId: seeded.workspaceId,
+      jobId: job.id,
+      campaignId,
+    });
+    ingestMailgunEvent({
+      event: "opened",
+      recipient: "ana@x.com",
+      workspaceId: seeded.workspaceId,
+      jobId: job.id,
+      campaignId,
+    });
+    ingestMailgunEvent({
+      event: "complained",
+      recipient: "ana@x.com",
+      workspaceId: seeded.workspaceId,
+      jobId: job.id,
+      campaignId,
+    });
+    const campaign = readDb().campaigns.find((c) => c.id === campaignId);
+    assert(campaign?.stats.opened === 1, `unique opens expected 1 got ${campaign?.stats.opened}`);
+    assert(campaign?.stats.complained === 1, "spam counted");
+    const ana = readDb().contacts.find((c) => c.email === "ana@x.com");
+    assert(ana?.status === "suppressed" && ana.suppressReason === "complaint", "spam suppresses");
+  });
+
+  await test("campaign report lists sent opened and spam per contact", async () => {
+    const seeded = await seedReadyWorkspace();
+    const camp = await api.handle(
+      "POST",
+      "/campaigns",
+      {
+        name: "Blast",
+        subject: "Oi",
+        listId: seeded.listId,
+        templateId: seeded.templateId,
+        sendNow: true,
+      },
+      seeded.token,
+    );
+    const campaignId = (camp.data as { campaign: { id: string } }).campaign.id;
+    const { readDb } = await import("./store");
+    const job = readDb().jobs.find((j) => j.campaignId === campaignId && j.to === "ana@x.com");
+    const { ingestMailgunEvent } = await import("./worker");
+    ingestMailgunEvent({
+      event: "opened",
+      recipient: "ana@x.com",
+      workspaceId: seeded.workspaceId,
+      jobId: job?.id,
+      campaignId,
+    });
+    ingestMailgunEvent({
+      event: "complained",
+      recipient: "bob@x.com",
+      workspaceId: seeded.workspaceId,
+      campaignId,
+    });
+    const report = await api.handle("GET", `/campaigns/${campaignId}/report`, {}, seeded.token);
+    assert(report.ok, report.error);
+    const rows = (report.data as { rows: { email: string; sent: boolean; opened: boolean; complained: boolean }[] }).rows;
+    const ana = rows.find((r) => r.email === "ana@x.com");
+    const bob = rows.find((r) => r.email === "bob@x.com");
+    assert(ana?.sent && ana.opened && !ana.complained, "ana opened");
+    assert(bob?.complained, "bob spam");
+    const csv = (report.data as { csv: string }).csv;
+    assert(csv.includes("email,name,sent,delivered,opened,clicked,bounced,bounce_reason,complained,unsubscribed,replied"), "csv header");
+    assert(csv.includes("ana@x.com"), "csv has ana");
+    const { buildCampaignWorkbook } = await import("./report-xlsx");
+    const xlsx = buildCampaignWorkbook(report.data as never);
+    assert(xlsx.length > 200, "xlsx bytes");
+    const book = (await import("xlsx")).read(xlsx, { type: "buffer" });
+    assert(book.SheetNames.includes("Resumo") && book.SheetNames.includes("Contatos"), "sheets");
+    const resumo = (await import("xlsx")).utils.sheet_to_json(book.Sheets.Resumo, { header: 1 }) as string[][];
+    assert(resumo.flat().some((c) => String(c).includes("Abertos")), "kpi abertos");
+    const contatos = (await import("xlsx")).utils.sheet_to_json(book.Sheets.Contatos) as { Email: string }[];
+    assert(contatos.some((r) => r.Email === "ana@x.com"), "ana row");
+  });
+
+  await test("campaign counts unique replies from inbound mailgun event", async () => {
+    const seeded = await seedReadyWorkspace();
+    const camp = await api.handle(
+      "POST",
+      "/campaigns",
+      {
+        name: "Blast",
+        subject: "Oi",
+        listId: seeded.listId,
+        templateId: seeded.templateId,
+        sendNow: true,
+      },
+      seeded.token,
+    );
+    const campaignId = (camp.data as { campaign: { id: string } }).campaign.id;
+    const { ingestMailgunEvent } = await import("./worker");
+    ingestMailgunEvent({
+      event: "stored",
+      recipient: "ola@mail.a.com",
+      sender: "ana@x.com",
+      workspaceId: seeded.workspaceId,
+      campaignId,
+    });
+    ingestMailgunEvent({
+      event: "replied",
+      recipient: "ana@x.com",
+      workspaceId: seeded.workspaceId,
+      campaignId,
+    });
+    const { readDb } = await import("./store");
+    const campaign = readDb().campaigns.find((c) => c.id === campaignId);
+    assert(campaign?.stats.replied === 1, `unique replies expected 1 got ${campaign?.stats.replied}`);
+    const report = await api.handle("GET", `/campaigns/${campaignId}/report`, {}, seeded.token);
+    const ana = (report.data as { rows: { email: string; replied: boolean }[] }).rows.find((r) => r.email === "ana@x.com");
+    assert(ana?.replied, "ana replied");
+    assert((report.data as { stats: { opened: number; complained: number; replied: number } }).stats.replied === 1, "stats");
+  });
+
+  await test("workspace updates from local and reply-to on sending domain", async () => {
+    const { data } = await api.login({ email: "arcanjo", password: "29172510" });
+    const ws = await api.handle(
+      "POST",
+      "/workspaces",
+      { name: "A", email: "a@a.com", password: "pw", domain: "mail.a.com", fromName: "A" },
+      data!.token,
+    );
+    const workspaceId = (ws.data as { workspace: { id: string } }).workspace.id;
+    const token = (await api.login({ email: "a@a.com", password: "pw" })).data!.token;
+    const badHost = await api.handle(
+      "PATCH",
+      `/workspaces/${workspaceId}/sender`,
+      { fromLocal: "ola@outro.com" },
+      token,
+    );
+    assert(badHost.status === 400 && badHost.error === "from_locked_to_domain", "host locked");
+    const badReply = await api.handle(
+      "PATCH",
+      `/workspaces/${workspaceId}/sender`,
+      { replyTo: "nao-e-email" },
+      token,
+    );
+    assert(badReply.status === 400 && badReply.error === "invalid_reply_to", "reply");
+    const okRes = await api.handle(
+      "PATCH",
+      `/workspaces/${workspaceId}/sender`,
+      { fromName: "Atelier", fromLocal: "vendas", replyTo: "contato@atelier.com" },
+      token,
+    );
+    assert(okRes.ok, okRes.error);
+    const domain = (okRes.data as { domain: { fromName: string; fromEmail: string; replyTo?: string } }).domain;
+    assert(domain.fromName === "Atelier", "name");
+    assert(domain.fromEmail === "vendas@mail.a.com", "from locked");
+    assert(domain.replyTo === "contato@atelier.com", "reply-to");
+  });
+
+  await test("permanent failed bounce stores reason and temporary failed is ignored", async () => {
+    const seeded = await seedReadyWorkspace();
+    const ana = seeded.contacts.find((c) => c.email === "ana@x.com");
+    const camp = await api.handle(
+      "POST",
+      "/campaigns",
+      {
+        name: "Blast",
+        subject: "Oi",
+        listId: seeded.listId,
+        templateId: seeded.templateId,
+        contactIds: [ana!.id],
+        sendNow: true,
+      },
+      seeded.token,
+    );
+    const campaignId = (camp.data as { campaign: { id: string } }).campaign.id;
+    const { ingestMailgunEvent } = await import("./worker");
+    ingestMailgunEvent({
+      event: "failed",
+      severity: "temporary",
+      recipient: "ana@x.com",
+      workspaceId: seeded.workspaceId,
+      campaignId,
+      reason: "generic",
+      description: "421 mailbox busy",
+    });
+    ingestMailgunEvent({
+      event: "failed",
+      severity: "permanent",
+      recipient: "ana@x.com",
+      workspaceId: seeded.workspaceId,
+      campaignId,
+      reason: "bounce",
+      description: "550 5.1.1 user unknown",
+    });
+    ingestMailgunEvent({
+      event: "failed",
+      severity: "permanent",
+      recipient: "ghost@x.com",
+      workspaceId: seeded.workspaceId,
+      campaignId,
+      reason: "bounce",
+      description: "550 no such user",
+    });
+    const report = await api.handle("GET", `/campaigns/${campaignId}/report`, {}, seeded.token);
+    const data = report.data as {
+      stats: { bounced: number };
+      rows: { email: string; bounced: boolean; bounceReason: string }[];
+    };
+    assert(data.stats.bounced === 1, `bounce expected 1 got ${data.stats.bounced}`);
+    const anaRow = data.rows.find((r) => r.email === "ana@x.com");
+    assert(anaRow?.bounced, "ana bounced");
+    assert(anaRow?.bounceReason.includes("550 5.1.1"), "reason kept");
+    assert(data.rows.every((r) => r.email !== "ghost@x.com"), "other recipient stays out");
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed) process.exit(1);
 }
